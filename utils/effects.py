@@ -496,3 +496,471 @@ class YoloTextEffect(BaseEffect):
             output = output * (1.0 - person_mask) + frame.astype(np.float32) * person_mask
 
         return np.clip(output, 0, 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Mask builder helpers
+# ---------------------------------------------------------------------------
+
+def rect_mask(
+    frame_size: tuple,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    normalized: bool = True,
+) -> np.ndarray:
+    """
+    Build a float32 (H, W) binary mask for a rectangle.
+
+    Args:
+        frame_size: (width, height) of the output frame.
+        x, y:       Top-left corner. Normalized [0, 1] when ``normalized=True``,
+                    otherwise pixel coordinates.
+        width, height: Rectangle size (normalized or pixels, matching *x/y*).
+        normalized: If True all coordinates are expressed as fractions of the
+                    frame dimensions. Default True.
+
+    Returns:
+        float32 mask of shape (H, W) with 1.0 inside the rect, 0.0 outside.
+    """
+    fw, fh = frame_size
+    if normalized:
+        px, py = int(x * fw), int(y * fh)
+        pw, ph = int(width * fw), int(height * fh)
+    else:
+        px, py, pw, ph = int(x), int(y), int(width), int(height)
+
+    mask = np.zeros((fh, fw), dtype=np.float32)
+    x1, y1 = max(0, px), max(0, py)
+    x2, y2 = min(fw, px + pw), min(fh, py + ph)
+    mask[y1:y2, x1:x2] = 1.0
+    return mask
+
+
+def ellipse_mask(
+    frame_size: tuple,
+    cx: float,
+    cy: float,
+    rx: float,
+    ry: float,
+    normalized: bool = True,
+) -> np.ndarray:
+    """
+    Build a float32 (H, W) binary mask for an ellipse.
+
+    Args:
+        frame_size: (width, height) of the output frame.
+        cx, cy:     Centre of the ellipse (normalized or pixels).
+        rx, ry:     Semi-axes (normalized or pixels).
+        normalized: If True all coordinates are fractions of frame dims.
+
+    Returns:
+        float32 mask with 1.0 inside the ellipse.
+    """
+    fw, fh = frame_size
+    if normalized:
+        cx, cy = int(cx * fw), int(cy * fh)
+        rx, ry = int(rx * fw), int(ry * fh)
+    else:
+        cx, cy, rx, ry = int(cx), int(cy), int(rx), int(ry)
+
+    mask = np.zeros((fh, fw), dtype=np.float32)
+    cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 1.0, -1)
+    return mask
+
+
+def polygon_mask(
+    frame_size: tuple,
+    points: list,
+    normalized: bool = True,
+) -> np.ndarray:
+    """
+    Build a float32 (H, W) binary mask for a filled polygon.
+
+    Args:
+        frame_size: (width, height) of the output frame.
+        points:     List of (x, y) tuples (normalized or pixels).
+        normalized: If True coordinates are fractions of frame dims.
+
+    Returns:
+        float32 mask with 1.0 inside the polygon.
+    """
+    fw, fh = frame_size
+    if normalized:
+        pts = [(int(px * fw), int(py * fh)) for px, py in points]
+    else:
+        pts = [(int(px), int(py)) for px, py in points]
+
+    mask = np.zeros((fh, fw), dtype=np.float32)
+    poly = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+    cv2.fillPoly(mask, [poly], 1.0)
+    return mask
+
+
+# ---------------------------------------------------------------------------
+# MaskedEffect wrapper
+# ---------------------------------------------------------------------------
+
+class MaskedEffect(BaseEffect):
+    """
+    Constrains any ``BaseEffect`` to a specific region of the frame.
+
+    The *unaffected* portion of the frame is left untouched; the *affected*
+    region is blended using a soft alpha mask so you can feather the edges
+    for a seamless look.
+
+    Mask can be provided as:
+      • A pre-built float32 numpy array (H, W) with values 0–1.
+      • A string shorthand (``"rect"``, ``"ellipse"``, ``"polygon"``) together
+        with the matching ``region`` keyword arguments.
+
+    Parameters
+    ----------
+    effect : BaseEffect
+        The wrapped effect instance (e.g. ``BlurEffect()``, ``ZoomEffect()``…).
+    mask : np.ndarray | str
+        Either a pre-built float32 (H, W) mask **or** one of the string
+        shorthands: ``"rect"``, ``"ellipse"``, ``"polygon"``.
+    frame_size : tuple (width, height)
+        Required when *mask* is a string so the helper can build the mask.
+    feather : int
+        Gaussian blur radius applied to the mask to soften the edges (in
+        pixels). 0 = hard edge, larger values = smoother blend.
+        The kernel size used is ``2 * feather + 1`` (always odd).  Default 0.
+    invert : bool
+        If True, the effect is applied *outside* the mask instead of inside.
+        Default False.
+    normalized : bool
+        Passed to the mask builders when *mask* is a string. Default True.
+
+    Region keyword arguments (used when *mask* is a string)
+    --------------------------------------------------------
+    For ``"rect"``    → ``x``, ``y``, ``width``, ``height``
+    For ``"ellipse"`` → ``cx``, ``cy``, ``rx``, ``ry``
+    For ``"polygon"`` → ``points`` (list of (x, y) tuples)
+
+    Examples
+    --------
+    # Blur only the bottom-center quarter of the frame (normalized coords):
+    blur = BlurEffect(start_blur=0, end_blur=41)
+    masked = MaskedEffect(
+        blur,
+        mask="rect",
+        frame_size=(1920, 1080),
+        x=0.25, y=0.75, width=0.5, height=0.25,
+        feather=40,
+    )
+    pipeline.add_clip_effect(clip_idx=0, effect=masked, duration=3.0)
+
+    # Vignette-style: invert an ellipse so everything *outside* is darkened:
+    color = ColorAdjustEffect(
+        start_params={"brightness": -80, "saturation": 0.5},
+        end_params={"brightness": -80, "saturation": 0.5},
+    )
+    vignette = MaskedEffect(
+        color,
+        mask="ellipse",
+        frame_size=(1920, 1080),
+        cx=0.5, cy=0.5, rx=0.4, ry=0.4,
+        feather=120,
+        invert=True,
+    )
+    pipeline.add_clip_effect(clip_idx=0, effect=vignette, duration=CLIP_END)
+    """
+
+    def __init__(
+        self,
+        effect: BaseEffect,
+        mask,
+        frame_size: tuple = None,
+        feather: int = 0,
+        invert: bool = False,
+        normalized: bool = True,
+        **region_kwargs,
+    ):
+        # MaskedEffect inherits easing from the wrapped effect — do NOT pass
+        # easing again because the inner effect has already captured it.
+        super().__init__(easing="linear")
+        self.inner_effect = effect
+        self.feather      = feather
+        self.invert       = invert
+        self._frame_size  = frame_size
+
+        # Build / store the mask -----------------------------------------
+        if isinstance(mask, np.ndarray):
+            # Pre-built mask: just store it (will be rescaled lazily if needed)
+            self._static_mask = mask.astype(np.float32)
+            self._mask_type   = "static"
+        elif isinstance(mask, str):
+            if frame_size is None:
+                raise ValueError(
+                    "frame_size=(width, height) is required when mask is a string."
+                )
+            self._mask_type  = mask.lower()
+            self._region_kw  = region_kwargs
+            self._normalized = normalized
+            self._static_mask = self._build_mask(frame_size)
+        else:
+            raise TypeError(f"mask must be an ndarray or string, got {type(mask)}")
+
+        # Pre-apply feathering once (only for static-sized frames)
+        if self._frame_size is not None:
+            self._cached_alpha = self._make_alpha(self._static_mask)
+        else:
+            self._cached_alpha = None
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _build_mask(self, frame_size: tuple) -> np.ndarray:
+        """Build the raw binary mask from string shorthand + region kwargs."""
+        kw = self._region_kw
+        n  = self._normalized
+        mt = self._mask_type
+        if mt == "rect":
+            return rect_mask(frame_size, kw["x"], kw["y"], kw["width"], kw["height"], n)
+        elif mt == "ellipse":
+            return ellipse_mask(frame_size, kw["cx"], kw["cy"], kw["rx"], kw["ry"], n)
+        elif mt == "polygon":
+            return polygon_mask(frame_size, kw["points"], n)
+        else:
+            raise ValueError(f"Unknown mask type '{mt}'. Use 'rect', 'ellipse', or 'polygon'.")
+
+    def _make_alpha(self, raw_mask: np.ndarray) -> np.ndarray:
+        """Apply feathering + invert and return a (H, W, 1) float32 alpha."""
+        alpha = raw_mask.copy()
+        if self.feather > 0:
+            k = 2 * self.feather + 1   # always odd
+            alpha = cv2.GaussianBlur(alpha, (k, k), 0)
+        if self.invert:
+            alpha = 1.0 - alpha
+        alpha = np.clip(alpha, 0.0, 1.0)
+        return alpha[:, :, np.newaxis]   # (H, W, 1) for broadcast
+
+    def _get_alpha(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Returns the (H, W, 1) alpha for the current frame.
+        Rebuilds the mask lazily if the frame resolution doesn't match the
+        cached one (e.g. first call when frame_size wasn't provided).
+        """
+        fh, fw = frame.shape[:2]
+        if self._cached_alpha is not None and self._cached_alpha.shape[:2] == (fh, fw):
+            return self._cached_alpha
+
+        # Need to build / rescale
+        if self._mask_type == "static":
+            # Rescale the static mask to match current frame
+            resized = cv2.resize(self._static_mask, (fw, fh), interpolation=cv2.INTER_LINEAR)
+            self._cached_alpha = self._make_alpha(resized)
+        else:
+            raw = self._build_mask((fw, fh))
+            self._cached_alpha = self._make_alpha(raw)
+
+        return self._cached_alpha
+
+    # ------------------------------------------------------------------
+    # BaseEffect interface
+    # ------------------------------------------------------------------
+
+    def apply(self, frame: np.ndarray, current_time: float, progress: float) -> np.ndarray:
+        """
+        1. Run the inner effect on the full frame.
+        2. Blend the result back using the feathered mask so only the masked
+           region shows the effect.
+        """
+        # The inner effect already has its own easing baked in; call its
+        # process() (not apply()) so easing is applied correctly.
+        effected = self.inner_effect.process(frame, current_time, progress)
+
+        alpha = self._get_alpha(frame)   # (H, W, 1) float32
+
+        orig    = frame.astype(np.float32)
+        effected_f = effected.astype(np.float32)
+
+        blended = orig * (1.0 - alpha) + effected_f * alpha
+        return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# YoloSegMaskedEffect
+# ---------------------------------------------------------------------------
+
+class YoloSegMaskedEffect(BaseEffect):
+    """
+    Uses live YOLO person segmentation as a per-frame alpha mask to apply
+    any ``BaseEffect`` selectively to the **subject** or the **background**.
+
+    This is the dynamic counterpart of ``MaskedEffect``: instead of a fixed
+    geometric region the mask is re-inferred on every frame and temporally
+    smoothed to remove flicker — using exactly the same EMA strategy as
+    ``YoloGlowSegEffect`` and ``YoloTextEffect``.
+
+    Parameters
+    ----------
+    effect : BaseEffect
+        The effect to apply inside the mask.  Any existing effect works:
+        ``BlurEffect``, ``ColorAdjustEffect``, ``ZoomEffect``,
+        ``RGBShiftEffect``, etc.
+    model_path : str
+        Path to the YOLO segmentation model (OpenVINO or .pt).
+    target : str
+        ``"subject"`` — effect is applied to the person only (default).
+        ``"background"`` — effect is applied everywhere *except* the person.
+    feather : int
+        Extra Gaussian blur radius (pixels) added on top of the built-in
+        YOLO soft mask to further soften the edge.  0 = use the mask as-is.
+    easing : str | tuple | callable
+        Easing applied to the overall *progress* value passed to the inner
+        effect.  Defaults to ``"linear"`` (inner effect's own easing handles
+        the rest).
+
+    Examples
+    --------
+    Desaturate the background while the subject stays in full colour::
+
+        from utils.effects import ColorAdjustEffect, YoloSegMaskedEffect, CLIP_END
+
+        bg_desat = YoloSegMaskedEffect(
+            ColorAdjustEffect(
+                start_params={"saturation": 0.0},
+                end_params={"saturation": 0.0},
+            ),
+            model_path="utils/yolo26n-seg_int8_openvino_model/",
+            target="background",
+            feather=15,
+        )
+        pipeline.add_clip_effect(clip_idx=0, effect=bg_desat)
+
+    Blur only the subject::
+
+        from utils.effects import BlurEffect, YoloSegMaskedEffect
+
+        subject_blur = YoloSegMaskedEffect(
+            BlurEffect(start_blur=0, end_blur=31),
+            model_path="utils/yolo26n-seg_int8_openvino_model/",
+            target="subject",
+            feather=10,
+        )
+        pipeline.add_clip_effect(clip_idx=0, effect=subject_blur, duration=3.0)
+
+    Cinematic colour grade on the background (warm highlights)::
+
+        bg_grade = YoloSegMaskedEffect(
+            ColorAdjustEffect(
+                start_params={"brightness": 20, "contrast": 1.1, "saturation": 0.6},
+                end_params={"brightness": 20, "contrast": 1.1, "saturation": 0.6},
+            ),
+            model_path="utils/yolo26n-seg_int8_openvino_model/",
+            target="background",
+            feather=20,
+        )
+    """
+
+    def __init__(
+        self,
+        effect: BaseEffect,
+        model_path: str,
+        target: str = "subject",      # "subject" | "background"
+        feather: int = 0,
+        easing="linear",
+    ):
+        super().__init__(easing=easing)
+        self.inner_effect = effect
+        self.model        = YOLO(model_path)
+        self.target       = target.lower()
+        self.feather      = feather
+
+        # Temporal smoothing state (mirrors YoloGlowSegEffect / YoloTextEffect)
+        self.prev_mask      = None
+        self.last_good_mask = None
+        self.missed_frames  = 0
+
+    # ------------------------------------------------------------------
+    # Mask inference (same robust EMA as the other Yolo effects)
+    # ------------------------------------------------------------------
+
+    def _get_mask(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Returns a soft float32 (H, W, 1) alpha in [0, 1].
+        - 1.0  = person pixel  (when target="subject",    effect is applied here)
+        - 0.0  = background    (when target="background", effect is applied here after invert)
+        """
+        h, w = frame.shape[:2]
+
+        results = self.model.predict(
+            source=frame,
+            imgsz=320,
+            device="cpu",
+            verbose=False,
+            classes=[0],          # person only
+            retina_masks=True,
+        )
+        result = results[0]
+
+        has_detection = result.masks is not None and len(result.masks.data) > 0
+
+        if has_detection:
+            masks    = result.masks.data.cpu().numpy()          # (N, H, W)
+            combined = np.max(masks, axis=0).astype(np.float32) # union of all persons
+            self.last_good_mask = combined.copy()
+            self.missed_frames  = 0
+            if self.prev_mask is None or self.prev_mask.shape != combined.shape:
+                self.prev_mask = combined
+            else:
+                self.prev_mask = 0.3 * combined + 0.7 * self.prev_mask
+        else:
+            self.missed_frames += 1
+            last = self.last_good_mask
+            if last is not None and last.shape == (h, w) and self.missed_frames <= 15:
+                combined = last * (0.97 ** self.missed_frames)
+            else:
+                combined = np.zeros((h, w), dtype=np.float32)
+            if self.prev_mask is None or self.prev_mask.shape != combined.shape:
+                self.prev_mask = combined
+            else:
+                self.prev_mask = 0.15 * combined + 0.85 * self.prev_mask
+
+        # ── Binarize → dilate → soft-feather (same 3-step pipeline as YoloTextEffect) ──
+        binary   = (self.prev_mask > 0.3).astype(np.uint8) * 255
+        if not np.any(binary):
+            return np.zeros((h, w, 1), dtype=np.float32)
+
+        dilate_k = np.ones((11, 11), np.uint8)
+        dilated  = cv2.dilate(binary, dilate_k, iterations=1)
+        soft     = cv2.GaussianBlur(dilated.astype(np.float32), (21, 21), 0) / 255.0
+
+        # Optional extra feathering requested by the user
+        if self.feather > 0:
+            k = 2 * self.feather + 1
+            soft = cv2.GaussianBlur(soft, (k, k), 0)
+
+        alpha = np.clip(soft, 0.0, 1.0)
+
+        # Invert for "background" target
+        if self.target == "background":
+            alpha = 1.0 - alpha
+
+        return alpha[:, :, np.newaxis]   # (H, W, 1) for broadcast
+
+    # ------------------------------------------------------------------
+    # BaseEffect interface
+    # ------------------------------------------------------------------
+
+    def apply(self, frame: np.ndarray, current_time: float, progress: float) -> np.ndarray:
+        """
+        1. Run the wrapped effect on the *whole* frame to get the effected version.
+        2. Blend original ↔ effected using the live YOLO mask as alpha.
+        """
+        # Inner effect: call process() so its own easing is applied
+        effected = self.inner_effect.process(frame, current_time, progress)
+
+        alpha = self._get_mask(frame)   # (H, W, 1) float32
+
+        orig       = frame.astype(np.float32)
+        effected_f = effected.astype(np.float32)
+
+        # alpha=1 → show effected,  alpha=0 → show original
+        blended = orig * (1.0 - alpha) + effected_f * alpha
+        return np.clip(blended, 0, 255).astype(np.uint8)

@@ -14,6 +14,7 @@ CLIP_END = "clip_end"
 # Internal alias kept for backward-compat with duration=-1
 _CLIP_END_INT = -1.0
 
+
 class VideoPipeline:
     def __init__(self, fps: float = 30.0, output_size: tuple = (1980, 1080)):
         self.fps = fps
@@ -22,13 +23,28 @@ class VideoPipeline:
         self.transitions = []
         self.effects = []  # Format: [(effect_instance, start_time, end_time), ...]
 
-    def add_clip(self, filepath: str, start_time: float = 0, duration: float = -1):
-        """Adds a video clip to the pipeline."""
+    def add_clip(
+        self,
+        filepath: str,
+        start_time: float = 0,
+        duration: float = -1,
+        keep_audio: bool = True,
+    ):
+        """Adds a video clip to the pipeline.
+
+        Args:
+            filepath:   Path to the source video file.
+            start_time: Offset (seconds) into the source to begin reading.
+            duration:   How many seconds to use from the clip (-1 = full clip).
+            keep_audio: Whether to include this clip's original audio in the
+                        final mix.  Set to False to replace it with silence.
+        """
         self.clips.append(
             {
                 "filepath": filepath,
                 "start_time": start_time,
                 "duration": duration,
+                "keep_audio": keep_audio,
                 "effects": [],
             }
         )
@@ -46,7 +62,11 @@ class VideoPipeline:
         """Adds an effect to the global timeline.
         Pass duration=CLIP_END (or -1) to run until the pipeline ends."""
         self.effects.append(
-            {"effect": effect, "start_time": start_time, "duration": self._resolve_dur(duration)}
+            {
+                "effect": effect,
+                "start_time": start_time,
+                "duration": self._resolve_dur(duration),
+            }
         )
 
     def add_clip_effect(
@@ -59,7 +79,11 @@ class VideoPipeline:
         """Adds an effect to a specific clip's local timeline.
         Pass duration=CLIP_END (or -1) to run until the clip ends."""
         self.clips[clip_idx]["effects"].append(
-            {"effect": effect, "start_time": start_time, "duration": self._resolve_dur(duration)}
+            {
+                "effect": effect,
+                "start_time": start_time,
+                "duration": self._resolve_dur(duration),
+            }
         )
 
     # ------------------------------------------------------------------
@@ -69,7 +93,9 @@ class VideoPipeline:
     @staticmethod
     def _resolve_dur(duration) -> float:
         """Convert CLIP_END / legacy negative numbers to the internal -1.0 sentinel."""
-        if duration is CLIP_END or (isinstance(duration, (int, float)) and duration < 0):
+        if duration is CLIP_END or (
+            isinstance(duration, (int, float)) and duration < 0
+        ):
             return _CLIP_END_INT
         return float(duration)
 
@@ -165,12 +191,19 @@ class VideoPipeline:
             pipeline.to(clip_idx=0, duration=CLIP_END, zoom=1.2)  # runs entire clip
         """
         neutral = {
-            "blur": 0, "rgb_shift": 0.0, "zoom": 1.0,
-            "saturation": 1.0, "brightness": 0.0, "contrast": 1.0, "gamma": 1.0,
+            "blur": 0,
+            "rgb_shift": 0.0,
+            "zoom": 1.0,
+            "saturation": 1.0,
+            "brightness": 0.0,
+            "contrast": 1.0,
+            "gamma": 1.0,
         }
         from_props = {k: neutral[k] for k in props if k in neutral}
         for eff in self._build_effects_from_props(from_props, props, easing):
-            self.add_clip_effect(clip_idx, eff, start_time=start_time, duration=duration)
+            self.add_clip_effect(
+                clip_idx, eff, start_time=start_time, duration=duration
+            )
 
     def from_(
         self,
@@ -188,12 +221,19 @@ class VideoPipeline:
             pipeline.from_(clip_idx=0, duration=CLIP_END, saturation=0.0)  # entire clip
         """
         neutral = {
-            "blur": 0, "rgb_shift": 0.0, "zoom": 1.0,
-            "saturation": 1.0, "brightness": 0.0, "contrast": 1.0, "gamma": 1.0,
+            "blur": 0,
+            "rgb_shift": 0.0,
+            "zoom": 1.0,
+            "saturation": 1.0,
+            "brightness": 0.0,
+            "contrast": 1.0,
+            "gamma": 1.0,
         }
         to_props = {k: neutral[k] for k in props if k in neutral}
         for eff in self._build_effects_from_props(props, to_props, easing):
-            self.add_clip_effect(clip_idx, eff, start_time=start_time, duration=duration)
+            self.add_clip_effect(
+                clip_idx, eff, start_time=start_time, duration=duration
+            )
 
     def fromTo(
         self,
@@ -218,9 +258,11 @@ class VideoPipeline:
                             from_props={"zoom": 1.0}, to_props={"zoom": 1.3})
         """
         from_props = from_props or {}
-        to_props   = to_props   or {}
+        to_props = to_props or {}
         for eff in self._build_effects_from_props(from_props, to_props, easing):
-            self.add_clip_effect(clip_idx, eff, start_time=start_time, duration=duration)
+            self.add_clip_effect(
+                clip_idx, eff, start_time=start_time, duration=duration
+            )
 
     def render(self, output_path: str):
         if not self.clips:
@@ -304,15 +346,22 @@ class VideoPipeline:
 
             # Process Audio
             if AudioSegment is not None:
-                try:
-                    audio_clip = AudioSegment.from_file(
-                        self.clips[current_clip_idx]["filepath"]
-                    )
-                    # Match exact video frame duration
-                    audio_clip = audio_clip[: int(clip_dur * 1000)]
-                except Exception:
-                    # Fallback to silence if no audio track exists
-                    audio_clip = AudioSegment.silent(duration=int(clip_dur * 1000))
+                clip_keep_audio = self.clips[current_clip_idx].get("keep_audio", True)
+                dur_ms = int(clip_dur * 1000)
+
+                if clip_keep_audio:
+                    try:
+                        audio_clip = AudioSegment.from_file(
+                            self.clips[current_clip_idx]["filepath"]
+                        )
+                        # Match exact video frame duration
+                        audio_clip = audio_clip[:dur_ms]
+                    except Exception:
+                        # Fallback to silence if no audio track exists
+                        audio_clip = AudioSegment.silent(duration=dur_ms)
+                else:
+                    # User explicitly requested no audio for this clip
+                    audio_clip = AudioSegment.silent(duration=dur_ms)
 
                 if final_audio is None:
                     final_audio = audio_clip
@@ -491,7 +540,12 @@ if __name__ == "__main__":
 
     pipeline.add_clip("test2.mp4", duration=3.0)
 
-    from utils.effects import YoloTextEffect
+    from utils.effects import (
+        BlurEffect,
+        ColorAdjustEffect,
+        YoloSegMaskedEffect,
+        YoloTextEffect,
+    )
 
     # --- Low-level API: glow + depth-composite text on clip 0 ---
     print("Loading YOLO Effects...")
@@ -501,7 +555,7 @@ if __name__ == "__main__":
         intensity=3,
     )
 
-    # Text slides up and fades in. Person is composited on top via YOLO seg,
+    # Text slides  up and fades in. Person is composited on top via YOLO seg,
     # so the subject appears to stand IN FRONT of the text.
     #
     # Total on-screen time = transition_in + hold + transition_out
@@ -512,15 +566,15 @@ if __name__ == "__main__":
     title_text = YoloTextEffect(
         text="HIGHLIGHT REEL",
         font_path="Audiowide-Regular.ttf",
-        font_size=96,
+        font_size=150,
         position="center",
         color=(255, 255, 255),
         opacity=1.0,
-        transition_in=0.6,
+        transition_in=0.2,
         transition_out=0.4,
         animate_in="slide_up",
         animate_out="fade",
-        stroke_width=4,
+        stroke_width=0,
         stroke_color=(0, 0, 0),
         model_path="utils/yolo26n-seg_int8_openvino_model/",
         easing="ease_out",
@@ -543,6 +597,45 @@ if __name__ == "__main__":
         model_path=None,
     )
     pipeline.add_clip_effect(clip_idx=1, effect=caption, start_time=0.0, duration=2.0)
+
+    MODEL = "utils/yolo26n-seg_int8_openvino_model/"
+
+    # --- YoloSegMaskedEffect: background desaturation on clip 0 ---
+    # Background goes greyscale while the subject keeps its original colour.
+    print("Setting up YoloSeg masked effects...")
+    bg_desat = YoloSegMaskedEffect(
+        ColorAdjustEffect(
+            start_params={"saturation": 0.0, "brightness": -15},
+            end_params={"saturation": 0.0, "brightness": -15},
+        ),
+        model_path=MODEL,
+        target="background",
+        feather=20,
+    )
+    pipeline.add_clip_effect(clip_idx=0, effect=bg_desat)
+
+    # --- YoloSegMaskedEffect: soft background blur on clip 0 ---
+    # Simulates a shallow depth-of-field; subject stays sharp.
+    bg_dof = YoloSegMaskedEffect(
+        BlurEffect(start_blur=0, end_blur=21),
+        model_path=MODEL,
+        target="background",
+        feather=15,
+    )
+    pipeline.add_clip_effect(clip_idx=0, effect=bg_dof, duration=5.0)
+
+    # --- YoloSegMaskedEffect: warm colour grade on the subject in clip 1 ---
+    # Boosts subject contrast & warmth while the GSAP blur/RGB-shift hits the bg.
+    subject_grade = YoloSegMaskedEffect(
+        ColorAdjustEffect(
+            start_params={"saturation": 1.4, "contrast": 1.15, "brightness": 10},
+            end_params={"saturation": 1.4, "contrast": 1.15, "brightness": 10},
+        ),
+        model_path=MODEL,
+        target="subject",
+        feather=18,
+    )
+    pipeline.add_clip_effect(clip_idx=1, effect=subject_grade)
 
     # --- GSAP-style API ---
     pipeline.to(clip_idx=0, duration=5.0, zoom=1.2, easing="ease_out")
