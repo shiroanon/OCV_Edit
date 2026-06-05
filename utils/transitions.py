@@ -1,9 +1,10 @@
 import cv2
 import numpy as np
-from utils.base import BaseTransition
+from utils.base import BaseTransition, EasingType
+from typing import Union, Tuple, Callable
 
 class SlideTransition(BaseTransition):
-    def __init__(self, duration: float = 1.0, easing: str = "ease_in_out", direction: str = "left"):
+    def __init__(self, duration: float = 1.0, easing: EasingType = "ease_in_out", direction: str = "left"):
         super().__init__(duration, easing)
         self.direction = direction
 
@@ -39,7 +40,7 @@ class SlideTransition(BaseTransition):
         return out_frame
 
 class ZoomTransition(BaseTransition):
-    def __init__(self, duration: float = 1.0, easing: str = "ease_in_out", mode: str = "in"):
+    def __init__(self, duration: float = 1.0, easing: EasingType = "ease_in_out", mode: str = "in"):
         super().__init__(duration, easing)
         self.mode = mode # "in", "out", "inout", "outin"
 
@@ -89,4 +90,135 @@ class ZoomTransition(BaseTransition):
         # Crossfade between zoomed frames
         blended = cv2.addWeighted(f1_zoomed, 1.0 - alpha, f2_zoomed, alpha, 0)
         return blended
+
+
+class GridWipeTransition(BaseTransition):
+    """Reveals the next clip in a grid-like block pattern.
+
+    The frame is divided into *cols* × *rows* blocks. Each block
+    flips from frame1 to frame2 in a staggered left→right / top→bottom order.
+
+    :param cols: Number of horizontal blocks (default 6).
+    :param rows: Number of vertical blocks (default 4).
+    :param stagger: Stagger direction — ``"row"`` (left→right per row, default)
+                    or ``"col"`` (top→bottom per column).
+    :param easing: Easing spec (applied per-block).
+    """
+    def __init__(
+        self,
+        duration: float = 1.0,
+        easing: EasingType = "ease_in_out",
+        cols: int = 6,
+        rows: int = 4,
+        stagger: str = "row",
+    ):
+        super().__init__(duration, easing)
+        self.cols = max(1, cols)
+        self.rows = max(1, rows)
+        self.stagger = stagger
+
+    def apply(self, frame1: np.ndarray, frame2: np.ndarray, progress: float) -> np.ndarray:
+        h, w = frame1.shape[:2]
+        out = frame1.copy()
+
+        bh = h // self.rows
+        bw = w // self.cols
+
+        for r in range(self.rows):
+            for c in range(self.cols):
+                # Stagger: each block has its own local progress
+                if self.stagger == "col":
+                    idx = c * self.rows + r
+                else:
+                    idx = r * self.cols + c
+                total = self.cols * self.rows
+                local_p = (progress * total - idx) / (total - idx)
+                local_p = max(0.0, min(1.0, local_p))
+
+                y1 = r * bh
+                y2 = (r + 1) * bh if r < self.rows - 1 else h
+                x1 = c * bw
+                x2 = (c + 1) * bw if c < self.cols - 1 else w
+
+                if local_p >= 1.0:
+                    out[y1:y2, x1:x2] = frame2[y1:y2, x1:x2]
+                elif local_p > 0.0:
+                    a = local_p
+                    sub1 = frame1[y1:y2, x1:x2].astype(np.float32)
+                    sub2 = frame2[y1:y2, x1:x2].astype(np.float32)
+                    blended = cv2.addWeighted(sub1, 1.0 - a, sub2, a, 0)
+                    out[y1:y2, x1:x2] = blended.astype(np.uint8)
+
+        return out
+
+
+class FlashTransition(BaseTransition):
+    """Flash to a solid color and back, revealing the next clip.
+
+    Goes frame1 → color → frame2.  Good for beat cuts and energetic edits.
+
+    :param color: BGR tuple for the flash (default (255, 255, 255) = white).
+    :param flash_point: Fraction of transition duration at the flash peak
+                        (default 0.35 — flash occurs ~1/3 through).
+    :param easing: Easing spec.
+    """
+    def __init__(
+        self,
+        duration: float = 1.0,
+        easing: EasingType = "ease_in_out",
+        color: tuple = (255, 255, 255),
+        flash_point: float = 0.35,
+    ):
+        super().__init__(duration, easing)
+        self.color = np.array(color, dtype=np.uint8).reshape(1, 1, 3)
+        self.flash_point = max(0.05, min(0.95, flash_point))
+
+    def apply(self, frame1: np.ndarray, frame2: np.ndarray, progress: float) -> np.ndarray:
+        h, w = frame1.shape[:2]
+        fp = self.flash_point
+
+        if progress < fp:
+            # Fade frame1 → flash color
+            a = progress / fp
+            flash = np.full((h, w, 3), self.color, dtype=np.uint8)
+            return cv2.addWeighted(frame1, 1.0 - a, flash, a, 0)
+        elif progress < 2.0 * fp:
+            # Fade flash color → frame2
+            a = (progress - fp) / fp
+            flash = np.full((h, w, 3), self.color, dtype=np.uint8)
+            return cv2.addWeighted(flash, 1.0 - a, frame2, a, 0)
+        else:
+            return frame2
+
+
+class RadialWipeTransition(BaseTransition):
+    """Radial wipe — a growing circle reveals the next clip from center.
+
+    :param origin: Normalised (x, y) centre of the wipe (default (0.5, 0.5)).
+    :param easing: Easing spec.
+    """
+    def __init__(
+        self,
+        duration: float = 1.0,
+        easing: EasingType = "ease_in_out",
+        origin: tuple = (0.5, 0.5),
+    ):
+        super().__init__(duration, easing)
+        self.origin = origin
+
+    def apply(self, frame1: np.ndarray, frame2: np.ndarray, progress: float) -> np.ndarray:
+        h, w = frame1.shape[:2]
+        cx = int(self.origin[0] * w)
+        cy = int(self.origin[1] * h)
+        max_radius = np.sqrt(max(cx, w - cx) ** 2 + max(cy, h - cy) ** 2)
+
+        Y, X = np.ogrid[:h, :w]
+        dist = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2)
+        radius = progress * max_radius
+
+        mask = (dist <= radius).astype(np.float32)
+
+        out = frame1.astype(np.float32) * (1.0 - mask[:, :, np.newaxis])
+        out += frame2.astype(np.float32) * mask[:, :, np.newaxis]
+        return np.clip(out, 0, 255).astype(np.uint8)
 

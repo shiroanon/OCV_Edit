@@ -1,8 +1,12 @@
 from abc import ABC, abstractmethod
+from typing import Any, Callable, Optional, Union, Tuple
 import numpy as np
 
+# Type for easing: string name, cubic bezier tuple, or a callable
+EasingType = Union[str, Tuple[float, float, float, float], Callable[[float], float]]
+
 class BaseTransition(ABC):
-    def __init__(self, duration: float = 1.0, easing = "linear"):
+    def __init__(self, duration: float = 1.0, easing: EasingType = "linear"):
         """
         Base class for Transitions.
         :param duration: duration of the transition in seconds
@@ -10,8 +14,10 @@ class BaseTransition(ABC):
         """
         from utils.easing import EASING_FUNCTIONS, create_cubic_bezier
         self.duration = duration
+        self.easing = easing
         self.easing_name = str(easing)
         
+        self.easing_func: Callable[[float], float]
         if callable(easing):
             self.easing_func = easing
         elif isinstance(easing, (tuple, list)) and len(easing) == 4:
@@ -36,19 +42,22 @@ class BaseTransition(ABC):
         """
         Internal method that applies easing before calling the abstract apply method.
         """
-        eased_progress = self.easing_func(progress)
+        eased_progress: float = float(self.easing_func(progress))
         # Ensure it stays within [0, 1]
         eased_progress = max(0.0, min(1.0, eased_progress))
         return self.apply(frame1, frame2, eased_progress)
 
 
 class BaseEffect(ABC):
-    def __init__(self, easing="linear"):
+    def __init__(self, easing: EasingType = "linear"):
         """
         Base class for Effects.
         :param easing: name of the easing function (str), a bezier tuple (x1, y1, x2, y2), or a callable
         """
         from utils.easing import EASING_FUNCTIONS, create_cubic_bezier
+        
+        self.easing = easing
+        self.easing_func: Callable[[float], float]
         if callable(easing):
             self.easing_func = easing
         elif isinstance(easing, (tuple, list)) and len(easing) == 4:
@@ -62,7 +71,7 @@ class BaseEffect(ABC):
         """
         Internal method that applies easing to progress before calling apply.
         """
-        eased_progress = self.easing_func(progress)
+        eased_progress: float = float(self.easing_func(progress))
         eased_progress = max(0.0, min(1.0, eased_progress))
         return self.apply(frame, current_time, eased_progress)
 
@@ -76,3 +85,4 @@ class BaseEffect(ABC):
         :return: processed frame
         """
         pass
+
