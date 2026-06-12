@@ -1,6 +1,6 @@
 # Auto-Editing Engine — Agent Guide
 
-The auto-editor (`auto_edit.py`, 1885 lines) generates and renders edit plans by aligning video "action points" to audio beats.
+The auto-editor (`auto_edit.py`, ~1644 lines) generates and renders edit plans by aligning video "action points" to audio beats.
 
 ## How It Works
 
@@ -13,6 +13,7 @@ The auto-editor (`auto_edit.py`, 1885 lines) generates and renders edit plans by
 
 ```bash
 python auto_edit.py \
+  --audio "audios/track.m4a" \
   --duration 60 \
   --resize-mode fill \
   --random-cursor \
@@ -33,7 +34,8 @@ python auto_edit.py \
 ### Arguments
 
 | Argument | Default | Description |
-|---|---|---|
+|---|---|---|---|
+| `--audio` | (hardcoded track) | Path to audio/metadata file |
 | `--duration` | 30 | Target output duration in seconds |
 | `--resize-mode` | fill | `fill` or `fit` |
 | `--random-cursor` | False | Random source start offset |
@@ -54,7 +56,7 @@ python auto_edit.py \
 
 Key sections:
 - **`lyrics`**: Text overlay settings (font, position, animations, max duration)
-- **`transitions`**: Types/weights/durations for auto-chosen transitions
+- **`transitions`**: Types/weights/durations for auto-chosen transitions (zoom, slide, grid_wipe, flash, radial_wipe, **zoom_in**)
 - **`grid`**: Layout weights, gap, color grade chances (desaturated/warm/cool)
 - **`span_weights`**: How many beats each scene covers (1/2/3 with weights 0.6/0.3/0.1)
 - **`beat_effects`**: Per-alignment-type beat-synced effects (zoom, RGB shift with chances/durations)
@@ -63,8 +65,8 @@ Key sections:
 
 | Mode | Method | When Used |
 |---|---|---|
-| `cc` | Cross-correlation (histogram-based) | Finds linear time-shift offset |
-| `dtw` | Dynamic Time Warping | Optimal non-linear path |
+| `cc` | Cross-correlation via speed matching | Time-scale clip to align actpoints to beats |
+| `dtw` | Dynamic Time Warping | Optimal non-linear path (multi-segment) |
 | `none` | No alignment | Random offsets |
 
 ## Plan Format (see `plan.json`)
@@ -99,16 +101,20 @@ Scene types: `"single"` (single clip), `"grid"` (3-panel grid with per-panel sou
 
 | Function | Line | Purpose |
 |---|---|---|
-| `parse_timecode(tc)` | 130 | `HH:MM:SS.ss` → seconds |
-| `parse_lrc(filepath)` | 136 | LRC lyrics to `[{time, text}]` |
-| `load_audio_metadata(path)` | ~150 | Reads beats from MP4 atoms |
-| `load_video_metadata(path)` | ~150 | Reads actpoints from MP4 atoms |
-| `cross_correlation_alignment(a, v)` | ~200 | Histogram-based time offset |
-| `dtw_alignment(a, v)` | ~200 | Dynamic Time Warping path |
-| `generate_edit_plan(args)` | 639 | Core plan generation logic |
-| `apply_edit_plan(pipeline, plan)` | ~1500 | Plan → pipeline commands |
-| `patch_plan(plan_data, patches)` | ~600 | Apply JSON patches |
-| `main()` | ~1800 | CLI entry point |
+| Function | Approx Line | Purpose |
+|---|---|---|---|
+| `parse_timecode(tc)` | 44 | `HH:MM:SS.ss` → seconds |
+| `parse_lrc(filepath)` | 49 | LRC lyrics to `[{time, text}]` |
+| `load_audio_metadata(path)` | 66 | Reads beats from MP4 atoms |
+| `load_video_metadata(path)` | 74 | Reads actpoints from MP4 atoms |
+| `dtw_alignment(a, v)` | 101 | Dynamic Time Warping path |
+| `patch_plan(plan_data, patches)` | 256 | Apply JSON patches |
+| `_apply_common_beat_effects(list, cfg, beats)` | 311 | Zoom/ZoomToPoint/KenBurns/YoloEmission/RGBShift per beat |
+| `_apply_panel_effects(list, cfg, beats)` | 360 | Panel Slide/Pulse/Bounce/Spin (grid mode only) |
+| `_apply_grid_frame_effects(clip, cfg, beats)` | 413 | Grid Scan/Flash/Glitch/Wave/Pixelate/Chromatic (grid mode) |
+| `generate_edit_plan(args)` | 524 | Core plan generation logic |
+| `apply_edit_plan(pipeline, plan)` | 1331 | Plan → pipeline commands |
+| `main()` | 1460 | CLI entry point |
 
 ## Metadata Format (MP4 Custom Atoms)
 

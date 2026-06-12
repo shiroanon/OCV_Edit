@@ -6,7 +6,7 @@ The project uses Ultralytics YOLOv8n-seg (OpenVINO INT8 quantized) for real-time
 
 ## Model
 
-**Path**: `utils/yolo26n-seg_int8_openvino_model/`
+**Path**: `utils/yolo26s-seg_int8_openvino_model/`
 - COCO class 0 only (person)
 - Input size: 320×320 (optimized for speed)
 - `retina_masks=True` for full-resolution masks (no letterbox cutoff)
@@ -15,7 +15,7 @@ The project uses Ultralytics YOLOv8n-seg (OpenVINO INT8 quantized) for real-time
 **Loading**:
 ```python
 from utils.effects import get_yolo_model
-model = get_yolo_model("utils/yolo26n-seg_int8_openvino_model/")
+model = get_yolo_model("utils/yolo26s-seg_int8_openvino_model/")
 # Returns cached instance on subsequent calls
 ```
 
@@ -27,7 +27,7 @@ Adds a colored glow around detected people.
 
 ```python
 YoloGlowSegEffect(
-    model_path="utils/yolo26n-seg_int8_openvino_model/",
+    model_path="utils/yolo26s-seg_int8_openvino_model/",
     glow_color=(0, 255, 255),     # BGR color
     blur_amount=41,                # Gaussian blur kernel (odd)
     intensity=1.5,                 # glow brightness multiplier
@@ -54,7 +54,7 @@ YoloTextEffect(
     animate_out="fade",            # "fade", "slide_up", "slide_down", "none"
     stroke_width=0,
     stroke_color=(0, 0, 0),        # BGR
-    model_path="utils/yolo26n-seg_int8_openvino_model/",
+    model_path="utils/yolo26s-seg_int8_openvino_model/",
     depth_composite=True,          # person on top of text
     line_spacing=1.1,
 )
@@ -73,7 +73,7 @@ Wraps any `BaseEffect` and applies it only to the person or the background.
 ```python
 YoloSegMaskedEffect(
     inner_effect,                            # any BaseEffect instance
-    model_path="utils/yolo26n-seg_int8_openvino_model/",
+    model_path="utils/yolo26s-seg_int8_openvino_model/",
     target="subject",                        # "subject" or "background"
     feather=15,                              # extra edge softening (pixels)
 )
@@ -129,7 +129,7 @@ mask = build_frame_mask(
     mask_params={"cx": 0.5, "cy": 0.5, "rx": 0.3, "ry": 0.3},
     feather=10,
     invert=False,
-    model_path="utils/yolo26n-seg_int8_openvino_model/",
+    model_path="utils/yolo26s-seg_int8_openvino_model/",
     local_time=0.0,
     state_holder=some_object,      # stores EMA state across frames
 )
@@ -143,7 +143,7 @@ This is used internally by `Layer.render_frame()` in `LayeredScene` for per-laye
 
 ```python
 from ultralytics import YOLO
-model = YOLO("yolo26n-seg_int8_openvino_model/")
+model = YOLO("yolo26s-seg_int8_openvino_model/")
 results = model.predict(source="video.mp4", save=True, imgsz=320, device="cpu", stream=True)
 ```
 

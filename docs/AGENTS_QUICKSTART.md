@@ -12,7 +12,7 @@ A Python declarative video editing pipeline. You build a timeline of clips, tran
 | `auto_edit.py` | Auto-editing engine — beat alignment, plan generation, CLI |
 | `utils/effects.py` | All effect implementations (10 classes) |
 | `utils/grid.py` | `GridScene`, `LayeredScene`, `GridPanel`, `Layer` |
-| `utils/transitions.py` | `SlideTransition`, `ZoomTransition` |
+| `utils/transitions.py` | `SlideTransition`, `ZoomTransition`, `ZoomInTransition`, `GridWipeTransition`, `FlashTransition`, `RadialWipeTransition` |
 | `utils/easing.py` | Easing functions (linear, ease-in/out, cubic-bezier) |
 | `utils/base.py` | Abstract `BaseEffect` & `BaseTransition` |
 
@@ -39,8 +39,8 @@ pipeline.render("output.mp4")
 - **GSAP-style animation**: `pipeline.to(clip_idx=0, duration=2.0, blur=25, zoom=1.3, easing="ease_out")`
 - **Grid scene**: Build `GridPanel` list → wrap in `GridScene` → `pipeline.add_grid_scene(scene)`
 - **Layered scene**: Build `Layer` list → wrap in `LayeredScene` → `pipeline.add_layered_scene(scene)`
-- **YOLO effect**: `YoloSegMaskedEffect(inner_effect, model_path="utils/yolo26n-seg_int8_openvino_model/", target="background")`
+- **YOLO effect**: `YoloSegMaskedEffect(inner_effect, model_path="utils/yolo26s-seg_int8_openvino_model/", target="background")`
 
 ## YOLO Model Path
 
-`utils/yolo26n-seg_int8_openvino_model/` (OpenVINO INT8, class 0=person only, imgsz=320)
+`utils/yolo26s-seg_int8_openvino_model/` (OpenVINO INT8, class 0=person only, imgsz=320)

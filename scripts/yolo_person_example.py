@@ -2,7 +2,7 @@ from ultralytics import YOLO
 
 # Load the NEW optimized model folder
 # (It will likely be named 'yolo26n-seg_openvino_model' still, but with new files)
-fast_model = YOLO("models/yolo26n-seg_int8_openvino_model/")
+fast_model = YOLO("models/yolo26s-seg_int8_openvino_model/")
 
 # Run the process silently
 results = fast_model.predict(

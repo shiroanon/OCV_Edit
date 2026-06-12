@@ -229,7 +229,7 @@ GSAP shorthand methods are just convenience wrappers around `add_clip_effect()`.
 ```python
 # Low-level: use a custom effect object
 from utils.effects import YoloGlowSegEffect
-glow = YoloGlowSegEffect(model_path="utils/yolo26n-seg_int8_openvino_model/", intensity=3)
+glow = YoloGlowSegEffect(model_path="utils/yolo26s-seg_int8_openvino_model/", intensity=3)
 pipeline.add_clip_effect(clip_idx=0, effect=glow)
 
 # High-level: GSAP shorthand for standard properties

@@ -34,10 +34,11 @@ Clips loop automatically when source time exceeds source duration.
 Transitions blend between clip `N` and clip `N+1`:
 
 ```python
-from utils.transitions import SlideTransition, ZoomTransition
+from utils.transitions import SlideTransition, ZoomTransition, ZoomInTransition
 
 pipeline.add_transition(SlideTransition(duration=0.5, direction="left"))
 pipeline.add_transition(ZoomTransition(duration=0.3, mode="inout"))
+pipeline.add_transition(ZoomInTransition(duration=0.3, max_zoom=5.0, blur_peak=3.0))
 ```
 
 The `i`-th transition is applied between `clips[i]` and `clips[i+1]`.
@@ -151,7 +152,7 @@ The render process:
 ```python
 pipeline = VideoPipeline(fps=30.0, output_size=(1920, 1080))
 pipeline.add_clip("person.mp4", duration=10.0)
-pipeline.add_transition(ZoomTransition(duration=0.3, mode="inout"))
+pipeline.add_transition(ZoomInTransition(duration=0.3))
 pipeline.add_clip("test2.mp4", duration=3.0)
 
 # YOLO glow + text + background desat + blur + color grade

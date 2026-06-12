@@ -130,8 +130,35 @@ class VideoPipeline:
         import os
         import subprocess
         import glob
+        import sys
+        import time
 
         from utils.audio import extract_clip_audio, merge_audio_segments, mux_video_audio
+
+        try:
+            from tqdm import tqdm as _tqdm
+        except ImportError:
+            def _tqdm(iterable, desc="", unit="", total=None, disable=False):
+                if disable:
+                    yield from iterable
+                    return
+                start = time.time()
+                total = total or len(iterable) if hasattr(iterable, '__len__') else None
+                for i, item in enumerate(iterable):
+                    elapsed = time.time() - start
+                    rate = (i + 1) / elapsed if elapsed > 0 else 0
+                    pct = f"{100.0 * (i + 1) / total:.0f}%" if total else f"{i + 1}"
+                    bar_len = 30
+                    if total:
+                        filled = int(bar_len * (i + 1) / total)
+                        bar = "█" * filled + "░" * (bar_len - filled)
+                        sys.stdout.write(f"\r{desc}: |{bar}| {pct}  {i + 1}/{total}  [{rate:.0f}it/s]")
+                    else:
+                        sys.stdout.write(f"\r{desc}: {pct} items  [{rate:.0f}it/s]")
+                    sys.stdout.flush()
+                    yield item
+                if not disable:
+                    sys.stdout.write("\n")
 
         try:
             from pydub import AudioSegment
@@ -159,6 +186,33 @@ class VideoPipeline:
 
         if AudioSegment is None:
             any_audio = False
+
+        # ── Calculate total frame count for progress bar ──────────────
+        total_frames = 0
+        for i, c in enumerate(self.clips):
+            if c.get("type", "clip") == "clip":
+                if c["duration"] <= 0:
+                    _probe = cv2.VideoCapture(c["filepath"])
+                    if not _probe.isOpened():
+                        print(f"Failed to open video: {c['filepath']}")
+                        return
+                    tf = _probe.get(cv2.CAP_PROP_FRAME_COUNT)
+                    sfps = _probe.get(cv2.CAP_PROP_FPS)
+                    sfps = sfps if sfps > 0 else 30.0
+                    source_dur = tf / sfps if sfps > 0 and tf > 0 else 1.0
+                    c["duration"] = source_dur / c.get("speed", 1.0)
+                    _probe.release()
+                else:
+                    _probe = cv2.VideoCapture(c["filepath"])
+                    _probe.release()
+            cd = c["duration"]
+            has_trans = i < len(self.transitions) and i + 1 < len(self.clips) and self.transitions[i] is not None
+            td = self.transitions[i].duration if has_trans else 0.0
+            clip_frames = int(max(0, cd - td) * self.fps)
+            trans_frames = int(td * self.fps) if has_trans else 0
+            total_frames += clip_frames + trans_frames
+
+        pbar = _tqdm(total=total_frames, desc="Rendering", unit="frame", disable=total_frames == 0)
 
         try:
             caps: List[Any] = [None] * len(self.clips)
@@ -190,28 +244,27 @@ class VideoPipeline:
             clip_pos = {i: 0 for i in range(len(self.clips))}
 
             for i, c in enumerate(self.clips):
-                if c.get("type", "clip") == "clip":
-                    if c["duration"] <= 0:
-                        _probe = cv2.VideoCapture(c["filepath"])
-                        if not _probe.isOpened():
-                            print(f"Failed to open video: {c['filepath']}")
-                            _probe.release()
-                            return
-                        total_frames = _probe.get(cv2.CAP_PROP_FRAME_COUNT)
-                        sfps = _probe.get(cv2.CAP_PROP_FPS)
-                        sfps = sfps if sfps > 0 else 30.0
-                        clip_source_fps[i] = sfps
-                        if sfps > 0 and total_frames > 0:
-                            source_dur = total_frames / sfps
-                            c["duration"] = source_dur / c.get("speed", 1.0)
-                        else:
-                            c["duration"] = 1.0
+                if c.get("type", "clip") == "clip" and c["duration"] <= 0:
+                    _probe = cv2.VideoCapture(c["filepath"])
+                    if not _probe.isOpened():
+                        print(f"Failed to open video: {c['filepath']}")
                         _probe.release()
+                        return
+                    total_frames_probe = _probe.get(cv2.CAP_PROP_FRAME_COUNT)
+                    sfps = _probe.get(cv2.CAP_PROP_FPS)
+                    sfps = sfps if sfps > 0 else 30.0
+                    clip_source_fps[i] = sfps
+                    if sfps > 0 and total_frames_probe > 0:
+                        source_dur = total_frames_probe / sfps
+                        c["duration"] = source_dur / c.get("speed", 1.0)
                     else:
-                        _probe = cv2.VideoCapture(c["filepath"])
-                        sfps = _probe.get(cv2.CAP_PROP_FPS)
-                        clip_source_fps[i] = sfps if sfps > 0 else 30.0
-                        _probe.release()
+                        c["duration"] = 1.0
+                    _probe.release()
+                elif c.get("type", "clip") == "clip":
+                    _probe = cv2.VideoCapture(c["filepath"])
+                    sfps = _probe.get(cv2.CAP_PROP_FPS)
+                    clip_source_fps[i] = sfps if sfps > 0 else 30.0
+                    _probe.release()
                 else:
                     c["duration"] = c["scene"].duration
 
@@ -248,14 +301,14 @@ class VideoPipeline:
                 _open_cap(clip_idx)
                 cap = caps[clip_idx]
                 fps = clip_source_fps[clip_idx]
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                source_dur = total_frames / fps
+                total_frames_seek = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                source_dur = total_frames_seek / fps
                 if source_dur > 0:
                     source_time = (c.get("start_time", 0.0) + local_output_time * speed) % source_dur
                 else:
                     source_time = c.get("start_time", 0.0) + local_output_time * speed
                 src_frame_idx = int(source_time * fps)
-                src_frame_idx = max(0, min(src_frame_idx, total_frames - 1))
+                src_frame_idx = max(0, min(src_frame_idx, total_frames_seek - 1))
                 if src_frame_idx == clip_pos[clip_idx]:
                     pass
                 elif src_frame_idx > clip_pos[clip_idx] and src_frame_idx - clip_pos[clip_idx] < 5:
@@ -265,7 +318,7 @@ class VideoPipeline:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, src_frame_idx)
                 ret, frame = cap.read()
                 if not ret:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total_frames - 1))
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, total_frames_seek - 1))
                     ret, frame = cap.read()
                     if not ret:
                         return False, None
@@ -378,6 +431,7 @@ class VideoPipeline:
                     frame = apply_local_effects(frame, self.clips[current_clip_idx], clip_local_times[current_clip_idx])
                     frame = apply_global_effects(frame, current_time)
                     out.write(frame)
+                    pbar.update(1)
                     current_time += 1.0 / self.fps
                     clip_local_times[current_clip_idx] += 1.0 / self.fps
 
@@ -394,6 +448,7 @@ class VideoPipeline:
                         blended = transition.process(frame1, frame2, progress) if transition else frame1
                         blended = apply_global_effects(blended, current_time)
                         out.write(blended)
+                        pbar.update(1)
                         current_time += 1.0 / self.fps
                         clip_local_times[current_clip_idx] += 1.0 / self.fps
                         clip_local_times[next_clip_idx] += 1.0 / self.fps
@@ -406,6 +461,7 @@ class VideoPipeline:
                 _release_cap(i)
             gc.collect()
             out.release()
+            pbar.close()
 
             if audio_segments:
                 print("Merging audio segments and muxing...")

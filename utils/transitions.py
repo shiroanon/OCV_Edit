@@ -222,3 +222,51 @@ class RadialWipeTransition(BaseTransition):
         out += frame2.astype(np.float32) * mask[:, :, np.newaxis]
         return np.clip(out, 0, 255).astype(np.uint8)
 
+
+class ZoomInTransition(BaseTransition):
+    """Aggressive zoom-in transition — zooms way into frame1, blurs at peak,
+    then reveals frame2 underneath.
+
+    Creates a classic "zoom through" feel used in modern video editing.
+
+    :param max_zoom: Peak zoom factor for the outgoing frame (default 5.0).
+    :param blur_peak: Max Gaussian blur sigma at midpoint; 0 disables blur (default 3.0).
+    :param easing: Easing spec.
+    """
+    def __init__(
+        self,
+        duration: float = 0.3,
+        easing: EasingType = (0.45, 0, 0.55, 1),
+        max_zoom: float = 5.0,
+        blur_peak: float = 3.0,
+    ):
+        super().__init__(duration, easing)
+        self.max_zoom = max(max_zoom, 1.01)
+        self.blur_peak = blur_peak
+
+    def apply(self, frame1: np.ndarray, frame2: np.ndarray, progress: float) -> np.ndarray:
+        h, w = frame1.shape[:2]
+
+        # Zoom: 1× → max_zoom
+        scale = 1.0 + (self.max_zoom - 1.0) * progress
+
+        # Alpha: steep curve so frame1 stays dominant most of the time
+        alpha = progress ** 3.5
+
+        # Scale + crop frame1
+        nh, nw = int(h * scale), int(w * scale)
+        resized = cv2.resize(frame1, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        y1 = (nh - h) // 2
+        x1 = (nw - w) // 2
+        f1 = resized[y1:y1 + h, x1:x1 + w]
+
+        # Blur ramp: 0 → peak → 0 (sinusoidal)
+        if self.blur_peak > 0.0:
+            blur_sigma = self.blur_peak * np.sin(np.pi * progress)
+            if blur_sigma > 0.5:
+                ksize = int(blur_sigma * 6 + 1) | 1
+                f1 = cv2.GaussianBlur(f1, (ksize, ksize), blur_sigma)
+
+        # Crossfade
+        return cv2.addWeighted(f1, 1.0 - alpha, frame2, alpha, 0)
+

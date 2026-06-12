@@ -2,7 +2,7 @@ import numpy as np
 
 from utils.transitions import (
     SlideTransition, ZoomTransition, GridWipeTransition,
-    FlashTransition, RadialWipeTransition,
+    FlashTransition, RadialWipeTransition, ZoomInTransition,
 )
 from utils.effects import (
     BlurEffect, ColorAdjustEffect, RGBShiftEffect, ZoomEffect, ZoomToPoint,
@@ -53,6 +53,16 @@ def serialize_transition(transition):
             "duration": transition.duration,
             "params": {"origin": transition.origin, "easing": transition.easing},
         }
+    elif isinstance(transition, ZoomInTransition):
+        return {
+            "type": "zoom_in",
+            "duration": transition.duration,
+            "params": {
+                "max_zoom": transition.max_zoom,
+                "blur_peak": transition.blur_peak,
+                "easing": transition.easing,
+            },
+        }
     return None
 
 
@@ -72,6 +82,8 @@ def deserialize_transition(data):
         return FlashTransition(duration=dur, color=tuple(params.get("color", [255, 255, 255])), flash_point=params.get("flash_point", 0.35), easing=params.get("easing", "ease_in_out"))
     elif t_type == "radial_wipe":
         return RadialWipeTransition(duration=dur, origin=tuple(params.get("origin", (0.5, 0.5))), easing=params.get("easing", "ease_in_out"))
+    elif t_type == "zoom_in":
+        return ZoomInTransition(duration=dur, max_zoom=params.get("max_zoom", 5.0), blur_peak=params.get("blur_peak", 3.0), easing=params.get("easing", (0.45, 0, 0.55, 1)))
     return None
 
 
@@ -264,5 +276,5 @@ def deserialize_effect(data):
     elif eff_type == "YoloEmissionEffect":
         return YoloEmissionEffect(inner_color=tuple(params.get("inner_color", [180, 220, 255])), outer_color=tuple(params.get("outer_color", [30, 80, 255])), inner_radius=params.get("inner_radius", 15), outer_radius=params.get("outer_radius", 51), intensity=params.get("intensity", 1.0), pulse_speed=params.get("pulse_speed", 2.5), pulse_amplitude=params.get("pulse_amplitude", 0.15), easing=params.get("easing", "ease_in_out"))
     elif eff_type == "YoloTextEffect":
-        return YoloTextEffect(text=params.get("text", ""), font_path=params.get("font_path"), font_size=params.get("font_size", 80), position=params.get("position", "bottom_center"), color=tuple(params.get("color", [255, 255, 255])), opacity=params.get("opacity", 1.0), transition_in=params.get("transition_in", 0.5), transition_out=params.get("transition_out", 0.5), animate_in=params.get("animate_in", "slide_up"), animate_out=params.get("animate_out", "fade"), stroke_width=params.get("stroke_width", 0), stroke_color=tuple(params.get("stroke_color", [0, 0, 0])), model_path="models/yolo26n-seg_int8_openvino_model/", depth_composite=params.get("depth_composite", True), line_spacing=params.get("line_spacing", 1.1), easing=params.get("easing", "linear"))
+        return YoloTextEffect(text=params.get("text", ""), font_path=params.get("font_path"), font_size=params.get("font_size", 80), position=params.get("position", "bottom_center"), color=tuple(params.get("color", [255, 255, 255])), opacity=params.get("opacity", 1.0), transition_in=params.get("transition_in", 0.5), transition_out=params.get("transition_out", 0.5), animate_in=params.get("animate_in", "slide_up"), animate_out=params.get("animate_out", "fade"), stroke_width=params.get("stroke_width", 0), stroke_color=tuple(params.get("stroke_color", [0, 0, 0])), model_path="models/yolo26s-seg_int8_openvino_model/", depth_composite=params.get("depth_composite", True), line_spacing=params.get("line_spacing", 1.1), easing=params.get("easing", "linear"))
     return None

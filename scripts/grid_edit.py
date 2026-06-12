@@ -19,7 +19,7 @@ from utils.effects import (
 from utils.grid import GridPanel, GridScene
 from utils.transitions import SlideTransition, ZoomTransition
 
-MODEL = "models/yolo26n-seg_int8_openvino_model/"
+MODEL = "models/yolo26s-seg_int8_openvino_model/"
 
 
 def main():

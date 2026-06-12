@@ -2,7 +2,7 @@
 
 ## YOLO Model
 
-The OpenVINO INT8 model at `utils/yolo26n-seg_int8_openvino_model/` is already optimized.
+The OpenVINO INT8 model at `utils/yolo26s-seg_int8_openvino_model/` is already optimized.
 - **Input size 320×320** (not full resolution) — this is the primary speed lever
 - **INT8 quantization** gives ~3× speedup over FP16 on CPU
 - **`retina_masks=True`** ensures masks aren't clipped by letterboxing (no quality loss at 320px)

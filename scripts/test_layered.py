@@ -6,7 +6,7 @@ from utils.grid import Layer, LayeredScene
 from utils.effects import GLSLEffect, BlurEffect
 
 # Check if model path exists
-yolo_model = "models/yolo26n-seg_int8_openvino_model/"
+yolo_model = "models/yolo26s-seg_int8_openvino_model/"
 if not os.path.exists(yolo_model):
     print(f"Warning: model path {yolo_model} not found, YOLO masking will be bypassed or fail.")
 

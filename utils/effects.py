@@ -10,7 +10,7 @@ from utils.model_manager import get_yolo_model
 class YoloGlowSegEffect(BaseEffect):
     def __init__(
         self,
-        model_path: Optional[str] = "models/yolo26n-seg_int8_openvino_model/",
+        model_path: Optional[str] = "models/yolo26s-seg_int8_openvino_model/",
         glow_color: tuple = (0, 255, 255),
         blur_amount: float = 0.038,
         intensity: float = 1.5,
@@ -129,7 +129,7 @@ class YoloGlowSegEffect(BaseEffect):
 class YoloEmissionEffect(BaseEffect):
     def __init__(
         self,
-        model_path: Optional[str] = "models/yolo26n-seg_int8_openvino_model/",
+        model_path: Optional[str] = "models/yolo26s-seg_int8_openvino_model/",
         inner_color: tuple = (180, 220, 255),
         outer_color: tuple = (30, 80, 255),
         inner_radius: float = 0.014,
@@ -1710,10 +1710,14 @@ def build_frame_mask(
                 dk = dk if dk % 2 else dk + 1
                 dilate_k = np.ones((dk, dk), np.uint8)
                 dilated = cv2.dilate(binary, dilate_k, iterations=1)
-                sk = max(3, int(0.019 * h))
-                sk = sk if sk % 2 else sk + 1
-                soft = cv2.GaussianBlur(dilated.astype(np.float32), (sk, sk), 0) / 255.0
-                mask = soft[:, :, np.newaxis]
+                bk = params.get("blur_kernel")
+                if bk is not None and bk == 0:
+                    mask = dilated.astype(np.float32)[:, :, np.newaxis] / 255.0
+                else:
+                    sk = max(3, int(0.019 * h))
+                    sk = sk if sk % 2 else sk + 1
+                    soft = cv2.GaussianBlur(dilated.astype(np.float32), (sk, sk), 0) / 255.0
+                    mask = soft[:, :, np.newaxis]
 
             if mt == "background":
                 mask = 1.0 - mask

@@ -70,9 +70,13 @@ pipeline.add_transition(WipeTransition(duration=0.5, direction="right", easing="
 ## Existing Transitions (Reference)
 
 | Class | Params | Mechanism |
-|---|---|---|
+|---|---|---|---|
 | `SlideTransition` | `direction: "left"\|"right"\|"up"\|"down"` | Offset-based: frame1 slides out, frame2 slides in |
 | `ZoomTransition` | `mode: "in"\|"out"\|"inout"\|"outin"` | Scale + center-crop/crossfade via `addWeighted` |
+| `ZoomInTransition` | `max_zoom: float, blur_peak: float` | Frame1 zooms 1×→`max_zoom` with sinusoidal blur, steep crossfade to frame2 |
+| `GridWipeTransition` | `cols, rows, stagger` | Staggered block-by-block reveal |
+| `FlashTransition` | `color, flash_point` | Frame1 → solid color → frame2 |
+| `RadialWipeTransition` | `origin` | Growing circle reveal from center |
 
 Look at these implementations in `utils/transitions.py` as templates.
 

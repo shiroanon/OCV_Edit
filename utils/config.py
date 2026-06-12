@@ -18,8 +18,8 @@ CONFIG: Dict[str, Any] = {
         "max_duration": 4.0,
     },
     "transitions": {
-        "types": ["zoom", "slide", "grid_wipe", "flash", "radial_wipe"],
-        "types_weights": [0.3, 0.3, 0.15, 0.15, 0.1],
+        "types": ["zoom", "slide", "grid_wipe", "flash", "radial_wipe", "zoom_in"],
+        "types_weights": [0.25, 0.25, 0.15, 0.15, 0.1, 0.1],
         "zoom_modes": ["in", "out"],
         "slide_directions": ["up", "down", "left", "right"],
         "duration": 0.2,
@@ -43,8 +43,9 @@ CONFIG: Dict[str, Any] = {
         "spans": [1, 2, 3],
         "weights": [0.6, 0.3, 0.1],
     },
+    "yolo_model_path": "models/yolo26s-seg_int8_openvino_model/",
     "beat_effects": {
-        "grid": {
+    "grid": {
             "zoom": {"start_zoom": 1.03, "end_zoom": 1.0, "duration": 0.25},
             "zoom_to_point": {
                 "chance": 0.3,

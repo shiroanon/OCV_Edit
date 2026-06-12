@@ -3,7 +3,7 @@ from utils.effects import (
     BlurEffect, ColorAdjustEffect, RGBShiftEffect, ZoomEffect, ZoomToPoint,
     YoloGlowSegEffect, YoloSegMaskedEffect, YoloTextEffect, GLSLEffect,
 )
-from utils.transitions import SlideTransition, ZoomTransition
+from utils.transitions import SlideTransition, ZoomTransition, ZoomInTransition
 
 if __name__ == "__main__":
     pipeline = VideoPipeline(fps=30.0, output_size=(1920, 1080))
@@ -14,7 +14,7 @@ if __name__ == "__main__":
 
     print("Loading YOLO Effects...")
     glow_effect = YoloGlowSegEffect(
-        model_path="models/yolo26n-seg_int8_openvino_model/",
+        model_path="models/yolo26s-seg_int8_openvino_model/",
         glow_color=(255, 100, 100), intensity=3,
     )
     title_text = YoloTextEffect(
@@ -24,7 +24,7 @@ if __name__ == "__main__":
         opacity=1.0, transition_in=0.2, transition_out=0.4,
         animate_in="slide_up", animate_out="fade",
         stroke_width=0.0, stroke_color=(0, 0, 0),
-        model_path="models/yolo26n-seg_int8_openvino_model/",
+        model_path="models/yolo26s-seg_int8_openvino_model/",
         easing="ease_out",
     )
     pipeline.add_clip_effect(clip_idx=0, effect=title_text, start_time=1.0, duration=CLIP_END)
@@ -37,7 +37,7 @@ if __name__ == "__main__":
     )
     pipeline.add_clip_effect(clip_idx=1, effect=caption, start_time=0.0, duration=2.0)
 
-    MODEL = "models/yolo26n-seg_int8_openvino_model/"
+    MODEL = "models/yolo26s-seg_int8_openvino_model/"
     print("Setting up YoloSeg masked effects...")
     bg_desat = YoloSegMaskedEffect(
         ColorAdjustEffect(start_params={"saturation": 0.0, "brightness": -15},
