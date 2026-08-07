@@ -1,0 +1,13 @@
+[package]
+name = "ocv-gpu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ocv-core = { path = "../core" }
+anyhow = "1"
+wgpu = "0.20"
+
+[lib]
+name = "ocv_gpu"
+path = "src/lib.rs"

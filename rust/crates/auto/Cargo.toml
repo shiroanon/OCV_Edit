@@ -1,0 +1,16 @@
+[package]
+name = "ocv-auto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ocv-core = { path = "../core" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+mp4ameta = { version = "0.12", default-features = false }
+rand = "0.8"
+
+[lib]
+name = "ocv_auto"
+path = "src/lib.rs"

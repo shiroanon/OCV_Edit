@@ -11,7 +11,7 @@ _CLIP_END_INT = -1.0
 
 
 class VideoPipeline:
-    def __init__(self, fps: float = 30.0, output_size: tuple = (1980, 1080), resize_mode: str = "fill"):
+    def __init__(self, fps: float = 30.0, output_size: tuple = (1980, 1080), resize_mode: str = "fit"):
         self.fps = fps
         self.output_size = output_size
         self.resize_mode = resize_mode
@@ -268,7 +268,7 @@ class VideoPipeline:
                 else:
                     c["duration"] = c["scene"].duration
 
-            def _resize_frame(frame, target_size, mode="fill"):
+                def _resize_frame(frame, target_size, mode="fit"):
                 h, w = frame.shape[:2]
                 tw, th = target_size
                 if mode == "fill":
@@ -323,7 +323,7 @@ class VideoPipeline:
                     if not ret:
                         return False, None
                 clip_pos[clip_idx] = src_frame_idx + 1
-                out_frame = _resize_frame(frame, target_size, mode=c.get("resize_mode", "fill"))
+                out_frame = _resize_frame(frame, target_size, mode=c.get("resize_mode", "fit"))
                 return (True, out_frame) if out_frame is not None else (False, None)
 
             def get_frame_for_timeline_item(clip_idx, local_output_time, target_size):

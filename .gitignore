@@ -6,3 +6,6 @@ __pycache__/
 /audios
 /assets/lyrics/asa.txt
 /frontend/.vscode
+/rust/.cargo
+/rust/919.mkv
+/rust/final_auto_edit.mp4

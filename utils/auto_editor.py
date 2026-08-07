@@ -145,7 +145,7 @@ def add_clip(
     speed=1.0,
     is_grid=False,
     trans_dur=0.0,
-    resize_mode="fill",
+    resize_mode="fit",
     grid_side=None,
     panels=None,
 ):
@@ -1359,7 +1359,7 @@ def generate_edit_plan(args):
 
 
 def apply_edit_plan(pipeline, plan_data):
-    resize_mode = plan_data.get("resize_mode", "fill")
+    resize_mode = plan_data.get("resize_mode", "fit")
     for eff_data in plan_data.get("global_effects", []):
         eff_obj = deserialize_effect(eff_data)
         if eff_obj:
@@ -1515,7 +1515,7 @@ def main():
     parser.add_argument(
         "--resize-mode",
         choices=["fill", "fit"],
-        default="fill",
+        default="fit",
         help="Resolution handling: 'fill' (zoom-crop to fill frame) or 'fit' (letterbox)",
     )
     parser.add_argument(
@@ -1644,7 +1644,7 @@ def main():
     pipeline = VideoPipeline(
         fps=plan_data.get("fps", 30.0),
         output_size=tuple(plan_data.get("output_size", [854, 480])),
-        resize_mode=plan_data.get("resize_mode", "fill"),
+        resize_mode=plan_data.get("resize_mode", "fit"),
     )
     apply_edit_plan(pipeline, plan_data)
 
