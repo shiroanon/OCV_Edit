@@ -48,6 +48,67 @@ pub struct Config {
     pub grid: GridCfg,
     pub span_weights: SpanWeights,
     pub beat_effects: BeatEffectsCfg,
+    /// Metadata-driven smart selector weights (see `select.rs`).
+    pub smart: SmartCfg,
+}
+
+/// Weights for the metadata-aware grid selector. Grid affinity is computed in
+/// `[-1, 1]` from audio beat density + video metadata, then mapped to a
+/// probability around `base_chance`.
+pub struct GridSelectorCfg {
+    pub base_chance: f32,
+    /// `clamp(base_chance + affinity * affinity_scale, lo, hi)`.
+    pub affinity_scale: f32,
+    pub chance_lo: f32,
+    pub chance_hi: f32,
+    /// Minor beats/second at which density contributes full grid affinity.
+    pub density_hi: f32,
+    /// Multipliers applied to each normalized signal component.
+    pub density_w: f32,
+    pub camera_w: f32,
+    pub action_w: f32,
+    pub focus_w: f32,
+    /// Affinity penalty (0..1) applied when the selected video has a peakpoint.
+    pub peak_penalty: f32,
+    /// Layout variety: panel count bounds, plus the density threshold that adds
+    /// an extra side panel.
+    pub min_panels: usize,
+    pub max_panels: usize,
+    pub min_density_panels: f32,
+    pub panels_per_density: usize,
+}
+
+/// Extra weights for the smart transition selector layered on top of the
+/// baseline `TransitionsCfg` types/weights.
+pub struct TransitionSmartCfg {
+    /// Probability of honoring the audio segment's `suggestedtrans` when set.
+    pub suggested_priority: f32,
+    /// Weight multipliers applied when the cut lands on a major beat.
+    pub major_beat_boost: Vec<(String, f32)>,
+    /// Weight multipliers applied when the cut is an action/camera change.
+    pub action_change_boost: Vec<(String, f32)>,
+}
+
+/// Per-effect base weights for the smart effect selector, split by context.
+pub struct EffectSelectorCfg {
+    /// Max effects fired on a single point (per clip context).
+    pub max_per_point: usize,
+    /// Minimum seconds between scheduled effect start times. Points landing
+    /// closer than this to the previously scheduled effect are skipped, so
+    /// dense minor beats (2-3/sec) don't become a rapid-fire wall of effects.
+    pub min_gap: f32,
+    /// Intensity multiplier per point kind, order: major, minor, act, peak.
+    pub strengths: [f32; 4],
+    /// (effect type, base weight) tables.
+    pub single: Vec<(String, f32)>,
+    pub grid_panel: Vec<(String, f32)>,
+    pub grid_frame: Vec<(String, f32)>,
+}
+
+pub struct SmartCfg {
+    pub grid: GridSelectorCfg,
+    pub transitions: TransitionSmartCfg,
+    pub effects: EffectSelectorCfg,
 }
 
 pub struct LyricsCfg {
@@ -158,18 +219,95 @@ pub fn default_config() -> Config {
                 m.insert("cool".into(), 0.15);
                 m
             },
-            desaturated_params: ColorParams { saturation: 0.0, brightness: -10.0, contrast: 1.0 },
-            warm_params: ColorParams { saturation: 1.2, brightness: 8.0, contrast: 1.05 },
-            cool_params: ColorParams { saturation: 0.8, brightness: -8.0, contrast: 1.1 },
+            desaturated_params: ColorParams {
+                saturation: 0.0,
+                brightness: -10.0,
+                contrast: 1.0,
+            },
+            warm_params: ColorParams {
+                saturation: 1.2,
+                brightness: 8.0,
+                contrast: 1.05,
+            },
+            cool_params: ColorParams {
+                saturation: 0.8,
+                brightness: -8.0,
+                contrast: 1.1,
+            },
         },
         span_weights: SpanWeights {
             spans: vec![1, 2, 3],
-            weights: vec![0.6, 0.3, 0.1],
+            weights: vec![0.5, 0.4, 0.1],
+        },
+        smart: SmartCfg {
+            grid: GridSelectorCfg {
+                base_chance: 0.35,
+                affinity_scale: 0.55,
+                chance_lo: 0.05,
+                chance_hi: 0.9,
+                density_hi: 1.5,
+                density_w: 1.0,
+                camera_w: 0.3,
+                action_w: 0.4,
+                focus_w: 0.2,
+                peak_penalty: 0.8,
+                min_panels: 2,
+                max_panels: 3,
+                min_density_panels: 0.7,
+                panels_per_density: 1,
+            },
+            transitions: TransitionSmartCfg {
+                suggested_priority: 0.9,
+                major_beat_boost: vec![
+                    ("zoom_in".into(), 2.5),
+                    ("flash".into(), 2.0),
+                    ("radial_wipe".into(), 1.6),
+                ],
+                action_change_boost: vec![("slide".into(), 2.0), ("zoom".into(), 1.5)],
+            },
+            effects: EffectSelectorCfg {
+                max_per_point: 1,
+                min_gap: 0.4,
+                strengths: [1.0, 0.6, 0.9, 1.25],
+                single: vec![
+                    ("ZoomToPoint".into(), 0.5),
+                    ("KenBurnsEffect".into(), 0.25),
+                    ("BounceEffect".into(), 0.7),
+                    ("RGBShiftEffect".into(), 0.8),
+                    ("BlurEffect".into(), 0.25),
+                    ("FlipEffect".into(), 0.15),
+                    ("GlowEffect".into(), 0.15),
+                ],
+                grid_panel: vec![
+                    ("ZoomToPoint".into(), 0.4),
+                    ("PanelSlideEffect".into(), 0.6),
+                    ("PanelPulseEffect".into(), 0.5),
+                    ("PanelBounceEffect".into(), 0.5),
+                    ("PanelSpinEffect".into(), 0.3),
+                    ("BounceEffect".into(), 0.6),
+                    ("RGBShiftEffect".into(), 0.7),
+                ],
+                grid_frame: vec![
+                    ("GridFlashEffect".into(), 0.9),
+                    ("GridGlitchEffect".into(), 0.8),
+                    ("GridScanEffect".into(), 0.5),
+                    ("GridWaveWarpEffect".into(), 0.4),
+                    ("GridPixelateEffect".into(), 0.4),
+                    ("GridChromaticEffect".into(), 0.5),
+                ],
+            },
         },
         beat_effects: BeatEffectsCfg {
             grid: BeatEffectCfg {
-                zoom: BEffect { start_zoom: 1.03, end_zoom: 1.0, duration: 0.25 },
-                beat_bounce: BounceCfg { amplitude: 1.15, duration: 0.25 },
+                zoom: BEffect {
+                    start_zoom: 1.03,
+                    end_zoom: 1.0,
+                    duration: 0.25,
+                },
+                beat_bounce: BounceCfg {
+                    amplitude: 1.15,
+                    duration: 0.25,
+                },
                 zoom_to_point: Some(ChanceEffect {
                     chance: 0.3,
                     duration: 0.35,
@@ -234,8 +372,15 @@ pub fn default_config() -> Config {
                 max_grid_frame: 2,
             },
             cc: BeatEffectCfg {
-                zoom: BEffect { start_zoom: 1.03, end_zoom: 1.0, duration: 0.25 },
-                beat_bounce: BounceCfg { amplitude: 1.15, duration: 0.25 },
+                zoom: BEffect {
+                    start_zoom: 1.03,
+                    end_zoom: 1.0,
+                    duration: 0.25,
+                },
+                beat_bounce: BounceCfg {
+                    amplitude: 1.15,
+                    duration: 0.25,
+                },
                 zoom_to_point: Some(ChanceEffect {
                     chance: 0.0,
                     duration: 0.4,
@@ -272,8 +417,15 @@ pub fn default_config() -> Config {
                 max_grid_frame: 2,
             },
             dtw: BeatEffectCfg {
-                zoom: BEffect { start_zoom: 1.03, end_zoom: 1.0, duration: 0.25 },
-                beat_bounce: BounceCfg { amplitude: 1.15, duration: 0.25 },
+                zoom: BEffect {
+                    start_zoom: 1.03,
+                    end_zoom: 1.0,
+                    duration: 0.25,
+                },
+                beat_bounce: BounceCfg {
+                    amplitude: 1.15,
+                    duration: 0.25,
+                },
                 zoom_to_point: Some(ChanceEffect {
                     chance: 0.3,
                     duration: 0.35,
@@ -310,8 +462,15 @@ pub fn default_config() -> Config {
                 max_grid_frame: 2,
             },
             single: BeatEffectCfg {
-                zoom: BEffect { start_zoom: 1.03, end_zoom: 1.0, duration: 0.25 },
-                beat_bounce: BounceCfg { amplitude: 1.15, duration: 0.25 },
+                zoom: BEffect {
+                    start_zoom: 1.03,
+                    end_zoom: 1.0,
+                    duration: 0.25,
+                },
+                beat_bounce: BounceCfg {
+                    amplitude: 1.15,
+                    duration: 0.25,
+                },
                 zoom_to_point: None,
                 ken_burns: Some(ce(0.0, 0.7)),
                 panel_slide: None,

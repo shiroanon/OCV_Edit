@@ -163,29 +163,34 @@ pub fn blur_mask(mask: &Mask, sigma: f32) -> Mask {
     // Borrow the source slice directly — no redundant to_vec() clone.
     let src = mask.as_raw().as_slice();
     let mut tmp = vec![0.0f32; (w * h) as usize];
-    // horizontal pass
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = 0.0;
-            for (k, &kv) in kernel.iter().enumerate() {
-                let sx = (x as i64 + (k as i64 - kw)).clamp(0, w as i64 - 1) as u32;
-                acc += src[(y * w + sx) as usize] * kv;
+    // horizontal pass (parallel over rows; each row writes a disjoint slice)
+    tmp.par_chunks_exact_mut(w as usize)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let yw = y * w as usize;
+            for x in 0..w as usize {
+                let mut acc = 0.0;
+                for (k, &kv) in kernel.iter().enumerate() {
+                    let sx = (x as i64 + (k as i64 - kw)).clamp(0, w as i64 - 1) as usize;
+                    acc += src[yw + sx] * kv;
+                }
+                row[x] = acc;
             }
-            tmp[(y * w + x) as usize] = acc;
-        }
-    }
+        });
     let mut out = vec![0.0f32; (w * h) as usize];
-    // vertical pass
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = 0.0;
-            for (k, &kv) in kernel.iter().enumerate() {
-                let sy = (y as i64 + (k as i64 - kw)).clamp(0, h as i64 - 1) as u32;
-                acc += tmp[(sy * w + x) as usize] * kv;
+    // vertical pass (parallel over rows; reads strided from tmp)
+    out.par_chunks_exact_mut(w as usize)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..w as usize {
+                let mut acc = 0.0;
+                for (k, &kv) in kernel.iter().enumerate() {
+                    let sy = (y as i64 + (k as i64 - kw)).clamp(0, h as i64 - 1) as usize;
+                    acc += tmp[sy * w as usize + x] * kv;
+                }
+                row[x] = acc;
             }
-            out[(y * w + x) as usize] = acc;
-        }
-    }
+        });
     Mask::from_raw(w, h, out).expect("mask from raw")
 }
 
@@ -248,16 +253,20 @@ fn sample_bilinear(src: &[u8], w: f32, h: f32, sx: f32, sy: f32, fill: [u8; 3]) 
 // ───────────────────────── blend ─────────────────────────
 
 /// `out = w0*f0 + w1*f1` clamped to [0,255] (mirrors `cv2.addWeighted`).
-/// Inner loop parallelised with rayon.
+/// Inner loop parallelised with rayon over whole pixels (3-byte chunks —
+/// processing single bytes makes the parallel scheduler overhead dominate).
 pub fn add_weighted(f0: &Frame, w0: f32, f1: &Frame, w1: f32) -> Frame {
     debug_assert_eq!(f0.dimensions(), f1.dimensions());
     let a = f0.as_raw().as_slice();
     let b = f1.as_raw().as_slice();
     let mut raw = vec![0u8; a.len()];
-    raw.par_chunks_exact_mut(1)
-        .zip(a.par_iter().zip(b.par_iter()))
-        .for_each(|(out, (&ai, &bi))| {
-            out[0] = (ai as f32 * w0 + bi as f32 * w1).clamp(0.0, 255.0).round() as u8;
+    raw.par_chunks_exact_mut(3)
+        .zip(a.par_chunks_exact(3))
+        .zip(b.par_chunks_exact(3))
+        .for_each(|((out, ai), bi)| {
+            out[0] = (ai[0] as f32 * w0 + bi[0] as f32 * w1).clamp(0.0, 255.0).round() as u8;
+            out[1] = (ai[1] as f32 * w0 + bi[1] as f32 * w1).clamp(0.0, 255.0).round() as u8;
+            out[2] = (ai[2] as f32 * w0 + bi[2] as f32 * w1).clamp(0.0, 255.0).round() as u8;
         });
     Frame::from_raw(f0.width(), f0.height(), raw).expect("add_weighted")
 }
@@ -319,6 +328,12 @@ pub fn adjust_color(
     }
     if (saturation - 1.0).abs() > 1e-4 || (contrast - 1.0).abs() > 1e-4 || brightness.abs() > 1e-4 {
         // BGR -> approximate HSV: use per-pixel saturation scaling on max/min.
+        // `contrast`/`brightness` are constant for the whole frame, so the final
+        // `v*contrast + brightness` map is pre-computed once as a LUT instead of
+        // doing per-channel float math for every pixel.
+        let lut: Vec<u8> = (0..=255)
+            .map(|i| (i as f32 * contrast + brightness).clamp(0.0, 255.0).round() as u8)
+            .collect();
         d.par_chunks_exact_mut(3).for_each(|px| {
             let b = px[0] as f32;
             let g = px[1] as f32;
@@ -331,9 +346,7 @@ pub fn adjust_color(
             let new_delta = new_s * maxv;
             let new_min = maxv - new_delta;
             let (nb, ng, nr) = recolor(b, g, r, maxv, minv, new_min);
-            let adj = |v: f32| -> u8 {
-                (v * contrast + brightness).clamp(0.0, 255.0).round() as u8
-            };
+            let adj = |v: f32| lut[(v.round() as i32).clamp(0, 255) as usize];
             px[0] = adj(nb);
             px[1] = adj(ng);
             px[2] = adj(nr);

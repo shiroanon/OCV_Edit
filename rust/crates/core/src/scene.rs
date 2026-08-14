@@ -155,6 +155,9 @@ pub struct GridScene {
     /// Reusable scratch canvas — allocated once and re-zeroed each frame to
     /// avoid a full `Frame::new` allocation on every `render_frame` call.
     scratch: Mutex<Frame>,
+    /// Panel rects are a pure function of the output size, so compute them
+    /// once per size instead of rebuilding a Vec on every frame.
+    rects_cache: Mutex<Option<(u32, u32, Vec<(i32, i32, u32, u32)>)>>,
 }
 
 impl GridScene {
@@ -179,6 +182,7 @@ impl GridScene {
             effects: Vec::new(),
             panel_order,
             scratch: Mutex::new(Frame::new(1, 1)),
+            rects_cache: Mutex::new(None),
         }
     }
 
@@ -230,7 +234,18 @@ impl GridScene {
             for v in canvas.raw_mut() { *v = 0; }
         }
 
-        let rects = self.compute_rects(output_size);
+        let rects = {
+            let mut cache = self.rects_cache.lock().unwrap();
+            let (cw, ch) = output_size;
+            match &*cache {
+                Some((w, h, r)) if *w == cw && *h == ch => r.clone(),
+                _ => {
+                    let r = self.compute_rects(output_size);
+                    *cache = Some((cw, ch, r.clone()));
+                    r
+                }
+            }
+        };
 
         // Pre-fetch each source once so panels sharing the same source_index
         // don't each trigger a separate decode (and possible off-by-one frame).

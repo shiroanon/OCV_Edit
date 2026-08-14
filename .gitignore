@@ -9,3 +9,10 @@ __pycache__/
 /rust/.cargo
 /rust/919.mkv
 /rust/final_auto_edit.mp4
+/rust/target
+/test1.mp4
+/test2.mp4
+/test_autoedit_720p_30s.mp4
+/test_autoedit_grid_30s.mp4
+/test_potrait_human.mp4
+/test_render.py

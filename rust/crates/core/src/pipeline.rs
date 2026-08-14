@@ -49,6 +49,111 @@ pub struct EffectEntry {
     pub duration: f64, // <0 => until clip end
 }
 
+/// A background decode worker for one `ClipItem::File` clip.
+///
+/// ffmpeg decode + resize run on a dedicated thread, overlapping with the main
+/// thread's effect processing + encode. The worker emits the clip's frames in
+/// display order through a bounded channel (capacity 2 → at most a couple of
+/// frames buffered, so memory stays bounded):
+///
+///   1. **head**  — local time `[0, incoming_dur)`, shown during the incoming
+///      transition
+///   2. **body**  — local time `[incoming_dur, incoming_dur + clip_dur - trans_out)`,
+///      the bulk of the clip's frames
+///   3. **tail**  — local time `[incoming_dur + clip_dur - trans_out, …)`, shown
+///      during the outgoing transition
+///
+/// The tail start mirrors the Python-port bookkeeping in `render()` (persistent
+/// `clip_local_times`), so frame order/duration is identical to the synchronous
+/// path. `read_at` advances monotonically through the clip, so it never triggers
+/// an ffmpeg re-seek.
+struct DecodeWorker {
+    rx: std::sync::mpsc::Receiver<Result<Option<Frame>, String>>,
+}
+
+impl DecodeWorker {
+    fn spawn(
+        filepath: String,
+        start_time: f32,
+        speed: f32,
+        resize_mode: String,
+        incoming_dur: f32,
+        clip_dur: f32,
+        trans_out: f32,
+        ow: u32,
+        oh: u32,
+        fps: f64,
+    ) -> DecodeWorker {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Option<Frame>, String>>(2);
+        std::thread::spawn(move || {
+            let mut src = match VideoSource::open(&filepath) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.send(Err(e.to_string()));
+                    return;
+                }
+            };
+            let fpsf = fps as f32;
+            let head = (incoming_dur * fpsf).max(0.0) as usize;
+            let body = ((clip_dur - trans_out) * fpsf).max(0.0) as usize;
+            let tail = (trans_out * fpsf).max(0.0) as usize;
+
+            let emit = |src: &mut VideoSource,
+                        tx: &std::sync::mpsc::SyncSender<Result<Option<Frame>, String>>,
+                        local: f32|
+             -> bool {
+                let st = start_time as f64 + local as f64 * speed as f64;
+                match src.read_at(st) {
+                    Ok(Some(f)) => {
+                        let f = resize_frame(&f, ow, oh, &resize_mode);
+                        tx.send(Ok(Some(f))).is_ok()
+                    }
+                    Ok(None) => {
+                        let _ = tx.send(Ok(None));
+                        false
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e.to_string()));
+                        false
+                    }
+                }
+            };
+
+            let mut ok = true;
+            for tf in 0..head {
+                if !ok {
+                    break;
+                }
+                ok = emit(&mut src, &tx, tf as f32 / fpsf);
+            }
+            for i in 0..body {
+                if !ok {
+                    break;
+                }
+                ok = emit(&mut src, &tx, incoming_dur + i as f32 / fpsf);
+            }
+            for tf in 0..tail {
+                if !ok {
+                    break;
+                }
+                ok = emit(&mut src, &tx, incoming_dur + clip_dur - trans_out + tf as f32 / fpsf);
+            }
+            // Dropping `tx` here (and any in `emit`) signals EOF to the consumer.
+        });
+        DecodeWorker { rx }
+    }
+
+    /// Next decoded frame in emission order. Returns `Ok(None)` at end of
+    /// stream (worker sent its terminal `None` or exited).
+    fn recv(&self) -> anyhow::Result<Option<Frame>> {
+        match self.rx.recv() {
+            Ok(Ok(f)) => Ok(f),
+            Ok(Err(e)) => anyhow::bail!("decode worker error: {e}"),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
 pub enum ClipItem {
     File {
         filepath: String,
@@ -257,7 +362,7 @@ impl VideoPipeline {
     ) -> Result<Option<Frame>> {
         let (ow, oh) = self.output_size;
         match clip {
-            ClipItem::File { filepath, start_time, speed, resize_mode, .. } => {
+            ClipItem::File { start_time, speed, resize_mode, .. } => {
                 let src = file_src.as_mut().unwrap();
                 let src_time = *start_time as f64 + (local_time as f64) * (*speed as f64);
                 let frame = src.read_at(src_time)?;
@@ -292,6 +397,37 @@ impl VideoPipeline {
         total
     }
 
+    /// Duration of clip `idx`'s outgoing transition (0 if none).
+    fn trans_out_dur(&self, idx: usize) -> f32 {
+        self.transitions.get(idx).and_then(|t| t.as_ref().map(|(_, d)| *d)).unwrap_or(0.0)
+    }
+
+    /// Spawn a background decode worker for `clip` when it is a
+    /// `ClipItem::File`; returns `None` for scene clips (they render
+    /// synchronously). `incoming_dur` is how far into the clip the head blend
+    /// already played, `trans_out` is the duration of the outgoing transition
+    /// whose tail frames this worker must produce.
+    fn spawn_file_worker(&self, clip: &ClipItem, incoming_dur: f32, trans_out: f32) -> Option<DecodeWorker> {
+        if let ClipItem::File { filepath, start_time, speed, resize_mode, .. } = clip {
+            let clip_dur = clip.duration();
+            let (ow, oh) = self.output_size;
+            Some(DecodeWorker::spawn(
+                filepath.clone(),
+                *start_time,
+                *speed,
+                resize_mode.clone(),
+                incoming_dur,
+                clip_dur,
+                trans_out,
+                ow,
+                oh,
+                self.fps,
+            ))
+        } else {
+            None
+        }
+    }
+
     pub fn render(&self, output_path: &str) -> Result<()> {
         if self.clips.is_empty() {
             println!("No clips added.");
@@ -316,6 +452,10 @@ impl VideoPipeline {
             total_frames as f64 / fps,
             fps
         );
+        // A decode worker spawned by a clip's outgoing transition, carried over
+        // into the next clip. Its head frames were consumed during the blend;
+        // body/tail remain for the next iteration.
+        let mut pending_worker: Option<DecodeWorker> = None;
         while current < self.clips.len() {
             let clip = &self.clips[current];
             let clip_dur = clip.duration();
@@ -342,11 +482,13 @@ impl VideoPipeline {
                 0.0
             };
 
-            let mut file_src: Option<VideoSource> = None;
-            if let ClipItem::File { filepath, .. } = clip {
-                let mut src = VideoSource::open(filepath)?;
-                src.set_target_size(ow, oh)?;
-                file_src = Some(src);
+            // Pipelined decode: for `ClipItem::File` clips, reuse the worker
+            // spawned by the previous clip's outgoing transition (its head
+            // frames were already blended in), or spawn a fresh one. Scene
+            // clips render synchronously via their own sources.
+            let mut worker: Option<DecodeWorker> = pending_worker.take();
+            if matches!(clip, ClipItem::File { .. }) && worker.is_none() {
+                worker = self.spawn_file_worker(clip, incoming_dur, trans_dur);
             }
 
             if any_audio {
@@ -390,7 +532,10 @@ impl VideoPipeline {
             let mut global_time = frame_count as f32 / fps as f32;
 
             for _ in 0..frames_to_read {
-                let base = self.get_clip_frame(clip, &mut file_src, local_time)?;
+                let base = match &worker {
+                    Some(w) => w.recv()?,
+                    None => self.get_clip_frame(clip, &mut None, local_time)?,
+                };
                 let f = match base {
                     Some(fr) => fr,
                     None => break,
@@ -409,17 +554,20 @@ impl VideoPipeline {
 
             if let Some(t) = trans {
                 let td = (trans_dur * fps as f32).max(0.0) as usize;
-                let mut next_src: Option<VideoSource> = None;
+                // Spawn the next clip's decode worker now: its head frames
+                // (local 0..trans_dur) are exactly what this transition blends
+                // in, and the worker carries over into the next clip's body so
+                // decode keeps running ahead of the encode.
+                let mut next_worker: Option<DecodeWorker> = None;
                 if current + 1 < self.clips.len() {
-                    if let ClipItem::File { filepath, .. } = &self.clips[current + 1] {
-                        let mut src = VideoSource::open(filepath)?;
-                        src.set_target_size(ow, oh)?;
-                        next_src = Some(src);
-                    }
+                    next_worker = self.spawn_file_worker(&self.clips[current + 1], trans_dur, self.trans_out_dur(current + 1));
                 }
                 for tf in 0..td {
                     let p = if td == 0 { 1.0 } else { tf as f32 / td as f32 };
-                    let f1 = self.get_clip_frame(clip, &mut file_src, local_time)?;
+                    let f1 = match &worker {
+                        Some(w) => w.recv()?,
+                        None => self.get_clip_frame(clip, &mut None, local_time)?,
+                    };
                     // The incoming clip plays from its OWN local time (0..trans_dur)
                     // during the transition, mirroring Python's
                     // `clip_local_times[next_clip_idx]`. Using the outgoing clip's
@@ -427,7 +575,10 @@ impl VideoPipeline {
                     // mid/tail frames while its audio was only starting — A/V desync.
                     let next_local = tf as f32 / fps as f32;
                     let f2 = if current + 1 < self.clips.len() {
-                        self.get_clip_frame(&self.clips[current + 1], &mut next_src, next_local)?
+                        match &next_worker {
+                            Some(w) => w.recv()?,
+                            None => self.get_clip_frame(&self.clips[current + 1], &mut None, next_local)?,
+                        }
                     } else {
                         None
                     };
@@ -443,6 +594,9 @@ impl VideoPipeline {
                     local_time += 1.0 / fps as f32;
                     global_time += 1.0 / fps as f32;
                 }
+                // Hand the next clip's worker (head already consumed) to the
+                // next iteration so its body decode continues in the background.
+                pending_worker = next_worker;
             }
 
             // Close grid/layered sources now that this clip is done rendering.

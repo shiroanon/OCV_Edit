@@ -16,6 +16,12 @@ pub struct BeatSegment {
     pub major: Vec<f32>,
     #[serde(default)]
     pub minor: Vec<f32>,
+    /// Transition names the annotator suggested for this segment
+    /// (e.g. "slideup", "slidedown"). Consumed by the smart transition selector.
+    #[serde(default)]
+    pub suggestedtrans: Vec<String>,
+    #[serde(default)]
+    pub interval: Option<[f32; 2]>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -40,6 +46,14 @@ pub struct VideoSegment {
 pub struct VideoSegMeta {
     #[serde(default)]
     pub actpoints: Vec<String>,
+    #[serde(default)]
+    pub peakpoint: Vec<String>,
+    #[serde(default)]
+    pub action: Vec<String>,
+    #[serde(default)]
+    pub camera: Vec<String>,
+    #[serde(default)]
+    pub focus: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,7 +61,19 @@ pub struct VideoData {
     pub file: String,
     pub interval: [f32; 2],
     pub actpoints: Vec<f32>,
+    pub peakpoints: Vec<f32>,
     pub tags: Vec<String>,
+    pub action: Vec<String>,
+    pub camera: Vec<String>,
+    pub focus: Vec<String>,
+}
+
+/// Parse a list of timestamps that may be either raw float seconds or
+/// `HH:MM:SS.ss` timecode strings (the annotator emits both across files).
+fn parse_times(raw: &[String]) -> Vec<f32> {
+    let mut out: Vec<f32> = raw.iter().map(|s| parse_timecode(s)).collect();
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    out
 }
 
 /// Parse "mm:ss.mmm" / "hh:mm:ss" / plain seconds.
@@ -106,14 +132,18 @@ pub fn scan_videos(dir: &str) -> Vec<VideoData> {
         };
         let full_dur = v_meta.duration.unwrap_or(0.0);
         for seg in &v_meta.segments {
-            let raw = &seg.meta.actpoints;
-            let act_secs: Vec<f32> = raw.iter().map(|s| parse_timecode(s)).collect();
+            let act_secs = parse_times(&seg.meta.actpoints);
+            let peak_secs = parse_times(&seg.meta.peakpoint);
             let interval = seg.interval.unwrap_or([0.0, full_dur]);
             out.push(VideoData {
                 file: vf.clone(),
                 interval,
                 actpoints: act_secs,
+                peakpoints: peak_secs,
                 tags: seg.tags.clone(),
+                action: seg.meta.action.clone(),
+                camera: seg.meta.camera.clone(),
+                focus: seg.meta.focus.clone(),
             });
         }
     }

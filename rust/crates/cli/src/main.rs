@@ -48,6 +48,10 @@ struct Args {
     keep_audio_tag: Option<String>,
     #[arg(long)]
     seed: Option<u64>,
+    /// Disable all metadata-driven selectors (grid/effects/transitions),
+    /// reverting to legacy chance-based selection.
+    #[arg(long)]
+    no_smart: bool,
     #[arg(long)]
     save_plan: Option<String>,
     #[arg(long)]
@@ -89,6 +93,9 @@ fn main() -> anyhow::Result<()> {
             seed: args.seed,
             audio_path: args.audio.clone(),
             keep_audio_tag: args.keep_audio_tag.clone(),
+            smart_grid: !args.no_smart,
+            smart_effects: !args.no_smart,
+            smart_transitions: !args.no_smart,
         };
         generate_edit_plan(&audio_meta, &videos, &gen)?
     };

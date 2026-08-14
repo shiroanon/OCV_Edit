@@ -1,5 +1,48 @@
 use crate::frame::{Frame, Mask, RawMut};
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+// ───────────────────────── cached font / layout ─────────────────────────
+
+/// Parsed fonts, keyed by the file path they were loaded from. Loading a TTF
+/// (`fs::read` + `FontVec::try_from_vec`) on every `render_text` call was a
+/// significant per-frame cost for text-heavy edits; fonts are immutable for the
+/// process lifetime, so parse once and share.
+static FONT_CACHE: OnceLock<Mutex<HashMap<String, Arc<FontVec>>>> = OnceLock::new();
+
+fn font_cache() -> &'static Mutex<HashMap<String, Arc<FontVec>>> {
+    FONT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Pre-computed text layout: wrapped lines plus their measured widths.
+struct TextLayout {
+    lines: Vec<String>,
+    line_widths: Vec<f32>,
+    total_w: f32,
+}
+
+static LAYOUT_CACHE: OnceLock<Mutex<HashMap<(String, u32), Arc<TextLayout>>>> = OnceLock::new();
+
+fn layout_cache() -> &'static Mutex<HashMap<(String, u32), Arc<TextLayout>>> {
+    LAYOUT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Wrapped layout (lines + per-line widths) cached per `(text, px_size)`.
+fn cached_layout(font: &FontVec, text: &str, px_size: f32, max_width: f32) -> Arc<TextLayout> {
+    let key = (text.to_string(), px_size.to_bits());
+    let mut cache = layout_cache().lock().unwrap();
+    if let Some(l) = cache.get(&key) {
+        return Arc::clone(l);
+    }
+    let scale = PxScale::from(px_size);
+    let lines = wrap_text(font, &scale, text, max_width);
+    let line_widths: Vec<f32> = lines.iter().map(|l| measure_line(font, &scale, l)).collect();
+    let total_w = line_widths.iter().copied().fold(0.0f32, f32::max);
+    let layout = Arc::new(TextLayout { lines, line_widths, total_w });
+    cache.insert(key, Arc::clone(&layout));
+    layout
+}
 
 pub struct TextOptions<'a> {
     pub size: (u32, u32),
@@ -44,16 +87,22 @@ impl TextPosition {
     }
 }
 
-fn load_font(path: Option<&str>) -> Option<FontVec> {
+fn load_font(path: Option<&str>) -> Option<Arc<FontVec>> {
     let candidates = [
         path.map(|p| p.to_string()),
         Some("assets/fonts/Audiowide-Regular.ttf".to_string()),
         Some("/home/shiro/Projects/OCV_Edit/assets/fonts/Audiowide-Regular.ttf".to_string()),
         Some("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf".to_string()),
     ];
+    let mut cache = font_cache().lock().unwrap();
     for c in candidates.into_iter().flatten() {
+        if let Some(f) = cache.get(&c) {
+            return Some(Arc::clone(f));
+        }
         if let Ok(bytes) = std::fs::read(&c) {
             if let Ok(f) = FontVec::try_from_vec(bytes) {
+                let f = Arc::new(f);
+                cache.insert(c, Arc::clone(&f));
                 return Some(f);
             }
         }
@@ -169,14 +218,9 @@ pub fn render_text(opts: &TextOptions) -> (Frame, Mask) {
     let line_height = (px_size * opts.line_spacing).max(1.0);
 
     let max_width = (w as f32 * 0.92) as f32;
-    let lines = wrap_text(&font, &scale, opts.text, max_width);
-
-    // Measure block
-    let mut total_w = 0.0f32;
-    for line in &lines {
-        let lw = measure_line(&font, &scale, line);
-        total_w = total_w.max(lw);
-    }
+    let layout = cached_layout(&font, opts.text, px_size, max_width);
+    let lines = &layout.lines;
+    let total_w = layout.total_w;
     let total_h = lines.len() as f32 * line_height;
 
     let margin = (0.031 * w as f32).max(10.0);
@@ -207,7 +251,7 @@ pub fn render_text(opts: &TextOptions) -> (Frame, Mask) {
             opts.position,
             TextPosition::Center | TextPosition::TopCenter | TextPosition::BottomCenter
         ) {
-            (w as f32 - measure_line(&font, &scale, line)) / 2.0
+            (w as f32 - layout.line_widths[i]) / 2.0
         } else {
             start_x
         };

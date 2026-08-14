@@ -4,6 +4,7 @@ use crate::frame::*;
 use crate::text::{render_text, TextOptions, TextPosition};
 use animato::{Interpolate, Waveform};
 use image::{GenericImage, GenericImageView};
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -538,6 +539,11 @@ pub struct TextEffect {
     depth_composite: bool,
     loader: Box<dyn MaskLoader>,
     easing: Easing,
+    /// Rendered (layer, mask) from the last frame, keyed by the only
+    /// per-frame-varying render inputs (size, quantized phase/opacity,
+    /// animation type). Static text reuses the cached glyph rasterization
+    /// instead of re-wrapping + re-rasterizing on every frame.
+    cached: std::sync::Mutex<Option<((u32, u32), u8, u8, String, Arc<Frame>, Arc<Mask>)>>,
 }
 impl TextEffect {
     #[allow(clippy::too_many_arguments)]
@@ -575,6 +581,7 @@ impl TextEffect {
             depth_composite,
             loader,
             easing: Easing::Linear,
+            cached: std::sync::Mutex::new(None),
         }
     }
 }
@@ -611,20 +618,49 @@ impl Effect for TextEffect {
         if text_opacity <= 0.0 {
             return frame.clone();
         }
-        let (bgr, alpha) = render_text(&TextOptions {
-            size: (w, h),
-            text: &self.text,
-            font_path: self.font_path.as_deref(),
-            font_size_frac: self.font_size_frac,
-            position: self.position,
-            color_bgr: self.color_bgr,
-            opacity: text_opacity,
-            stroke_width_frac: self.stroke_width_frac,
-            stroke_color_bgr: self.stroke_color_bgr,
-            animate: anim_type,
-            phase_p,
-            line_spacing: self.line_spacing,
-        });
+        // Cache the rasterized layer+mask so static text is composited from
+        // memory instead of re-rendered (wrap + measure + glyph rasterize) on
+        // every frame. Keyed on the per-frame-varying inputs; quantization
+        // granularity of 1/255 keeps fades visually identical.
+        let phase_quant = (phase_p.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let op_quant = (text_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let (bgr, alpha) = {
+            let mut c = self.cached.lock().unwrap();
+            match &*c {
+                Some(((cw, ch), pq, oq, at, b, a))
+                    if *cw == w && *ch == h && *pq == phase_quant && *oq == op_quant && at == anim_type =>
+                {
+                    (Arc::clone(b), Arc::clone(a))
+                }
+                _ => {
+                    let (bgr, alpha) = render_text(&TextOptions {
+                        size: (w, h),
+                        text: &self.text,
+                        font_path: self.font_path.as_deref(),
+                        font_size_frac: self.font_size_frac,
+                        position: self.position,
+                        color_bgr: self.color_bgr,
+                        opacity: text_opacity,
+                        stroke_width_frac: self.stroke_width_frac,
+                        stroke_color_bgr: self.stroke_color_bgr,
+                        animate: anim_type,
+                        phase_p,
+                        line_spacing: self.line_spacing,
+                    });
+                    let bgr = Arc::new(bgr);
+                    let alpha = Arc::new(alpha);
+                    *c = Some((
+                        (w, h),
+                        phase_quant,
+                        op_quant,
+                        anim_type.to_string(),
+                        Arc::clone(&bgr),
+                        Arc::clone(&alpha),
+                    ));
+                    (bgr, alpha)
+                }
+            }
+        };
         // composite text over frame
         let mut out = frame.clone();
         let od = out.raw_mut();
@@ -680,33 +716,42 @@ fn separable_morphology(m: &Mask, k: usize, dilate: bool) -> Mask {
 
     // ── horizontal pass ──────────────────────────────────────────
     let mut tmp = vec![0.0f32; (w * h) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let lo = (x as i32 - r).max(0) as u32;
-            let hi = (x as i32 + r).min(w as i32 - 1) as u32;
-            let acc = if dilate {
-                (lo..=hi).fold(0.0f32, |acc, nx| acc.max(src[(y * w + nx) as usize]))
-            } else {
-                (lo..=hi).fold(1.0f32, |acc, nx| acc.min(src[(y * w + nx) as usize]))
-            };
-            tmp[(y * w + x) as usize] = acc;
-        }
-    }
+    tmp.par_chunks_exact_mut(w as usize)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let yw = y * w as usize;
+            for x in 0..w as usize {
+                let lo = (x as i32 - r).max(0) as usize;
+                let hi = (x as i32 + r).min(w as i32 - 1) as usize;
+                let acc = if dilate {
+                    src[yw + lo..=yw + hi].iter().copied().fold(0.0f32, f32::max)
+                } else {
+                    src[yw + lo..=yw + hi].iter().copied().fold(1.0f32, f32::min)
+                };
+                row[x] = acc;
+            }
+        });
 
     // ── vertical pass ────────────────────────────────────────────
     let mut out = vec![0.0f32; (w * h) as usize];
-    for y in 0..h {
-        for x in 0..w {
-            let lo = (y as i32 - r).max(0) as u32;
-            let hi = (y as i32 + r).min(h as i32 - 1) as u32;
-            let acc = if dilate {
-                (lo..=hi).fold(0.0f32, |acc, ny| acc.max(tmp[(ny * w + x) as usize]))
-            } else {
-                (lo..=hi).fold(1.0f32, |acc, ny| acc.min(tmp[(ny * w + x) as usize]))
-            };
-            out[(y * w + x) as usize] = acc;
-        }
-    }
+    out.par_chunks_exact_mut(w as usize)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..w as usize {
+                let lo = (y as i32 - r).max(0) as usize;
+                let hi = (y as i32 + r).min(h as i32 - 1) as usize;
+                let acc = if dilate {
+                    (lo..=hi)
+                        .map(|ny| tmp[ny * w as usize + x])
+                        .fold(0.0f32, f32::max)
+                } else {
+                    (lo..=hi)
+                        .map(|ny| tmp[ny * w as usize + x])
+                        .fold(1.0f32, f32::min)
+                };
+                row[x] = acc;
+            }
+        });
     Mask::from_raw(w, h, out).expect("mask from raw")
 }
 

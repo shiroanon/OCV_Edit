@@ -9,6 +9,9 @@ use std::collections::HashSet;
 use crate::config::{BeatEffectCfg, ChanceEffect, default_config};
 use crate::metadata::{AudioMeta, VideoData};
 use crate::plan::{ClipSpec, EditPlan, EffectSpec, PanelSpec, SceneSpec, TransitionSpec};
+use crate::select::{
+    EffectCtx, EffectPoint, GridCtx, PointKind, select_effects, select_grid, select_transition,
+};
 
 #[derive(Debug, Clone)]
 pub struct GenArgs {
@@ -29,6 +32,11 @@ pub struct GenArgs {
     /// tagged video is forced into the plan (deduplicated by file) so all of
     /// their audio clips appear; the render duration is extended if too short.
     pub keep_audio_tag: Option<String>,
+    /// Use the metadata-driven selectors (grid/effects/transitions). When a
+    /// selector is disabled, the legacy chance-based logic is used instead.
+    pub smart_grid: bool,
+    pub smart_effects: bool,
+    pub smart_transitions: bool,
 }
 
 impl Default for GenArgs {
@@ -47,6 +55,9 @@ impl Default for GenArgs {
             seed: None,
             audio_path: String::new(),
             keep_audio_tag: None,
+            smart_grid: true,
+            smart_effects: true,
+            smart_transitions: true,
         }
     }
 }
@@ -292,76 +303,78 @@ fn make_transition(
     Some(make_transition_body(cfg, rng, &chosen, beat_gap))
 }
 
-fn grid_panels(
-    s_file: &str,
-    s_start: f32,
-    v_file: &str,
-    v_start: f32,
-    v_speed: f32,
-    side_effects: &[EffectSpec],
-) -> Vec<PanelSpec> {
-    vec![
-        // left panel: side video
-        PanelSpec {
-            frame: s_file.to_string(),
-            span: 1,
-            start_time: s_start,
-            flip: None,
-            speed: 1.0,
-            loop_: false,
-            effects: side_effects.to_vec(),
-            blend: "normal".into(),
-            shape: None,
-            yolo: false,
-            feature: false,
-            beat_tracking: false,
-            border_radius: 0.0,
-            border_width: 0.0,
-            border_color: None,
-            mask_dir: None,
-            ref_panel_idx: None,
-        },
-        // center panel: main video
-        PanelSpec {
-            frame: v_file.to_string(),
-            span: 1,
-            start_time: v_start,
-            flip: None,
-            speed: v_speed,
-            loop_: false,
-            effects: Vec::new(),
-            blend: "normal".into(),
-            shape: None,
-            yolo: false,
-            feature: false,
-            beat_tracking: false,
-            border_radius: 0.0,
-            border_width: 0.0,
-            border_color: None,
-            mask_dir: None,
-            ref_panel_idx: None,
-        },
-        // right panel: mirror of left via ref_panel + horizontal flip
-        PanelSpec {
-            frame: s_file.to_string(),
-            span: 1,
-            start_time: s_start,
-            flip: Some(1),
-            speed: 1.0,
-            loop_: false,
-            effects: side_effects.to_vec(),
-            blend: "normal".into(),
-            shape: None,
-            yolo: false,
-            feature: false,
-            beat_tracking: false,
-            border_radius: 0.0,
-            border_width: 0.0,
-            border_color: None,
-            mask_dir: None,
-            ref_panel_idx: Some(0),
-        },
-    ]
+/// Number of distinct clips usable as grid side panels for `v_seg`: excludes
+/// the main clip and, when `grid_tag` is set, clips carrying that tag (they
+/// are reserved for the main panel).
+fn count_side_candidates(videos: &[VideoData], v_seg: &VideoData, grid_tag: Option<&str>) -> usize {
+    videos
+        .iter()
+        .filter(|v| v.file != v_seg.file)
+        .filter(|v| match grid_tag {
+            Some(gt) => !v.tags.iter().any(|t| t == gt),
+            None => v.tags.iter().all(|t| !v_seg.tags.contains(t)),
+        })
+        .count()
+}
+
+/// `suggestedtrans` of the audio segment covering global time `t` (falls back
+/// to the first segment without an interval).
+fn suggested_transitions_for(audio_meta: &AudioMeta, t: f32) -> Vec<String> {
+    let mut no_interval: Vec<String> = Vec::new();
+    for seg in &audio_meta.segments {
+        match seg.interval {
+            Some([s, e]) => {
+                if t >= s && t < e {
+                    return seg.suggestedtrans.clone();
+                }
+            }
+            None => {
+                if no_interval.is_empty() {
+                    no_interval = seg.suggestedtrans.clone();
+                }
+            }
+        }
+    }
+    no_interval
+}
+
+/// Build the metadata *points* that drive the smart effect selector for one
+/// clip: audio minor beats (subtle), major beats (strong), plus the selected
+/// video's actpoints (action) and peakpoints (climax) projected onto the clip's
+/// local timeline. `video_to_local` maps a source video time to clip-local time.
+fn smart_effect_points(
+    filtered: &[f32],
+    majors: &[f32],
+    interval_start: f32,
+    interval_end: f32,
+    baseline: f32,
+    v_seg: &VideoData,
+    v_lo: f32,
+    v_hi: f32,
+    video_to_local: impl Fn(f32) -> f32,
+) -> Vec<EffectPoint> {
+    let mut pts = Vec::new();
+    for &m in filtered {
+        if m > interval_start && m < interval_end {
+            pts.push(EffectPoint { local_t: m - baseline, kind: PointKind::Minor });
+        }
+    }
+    for &m in majors {
+        if m > interval_start && m < interval_end {
+            pts.push(EffectPoint { local_t: m - baseline, kind: PointKind::Major });
+        }
+    }
+    for &a in &v_seg.actpoints {
+        if a >= v_lo && a <= v_hi {
+            pts.push(EffectPoint { local_t: video_to_local(a), kind: PointKind::Act });
+        }
+    }
+    for &p in &v_seg.peakpoints {
+        if p >= v_lo && p <= v_hi {
+            pts.push(EffectPoint { local_t: video_to_local(p), kind: PointKind::Peak });
+        }
+    }
+    pts
 }
 
 /// Mirrors `generate_edit_plan(args)` from `utils/auto_editor.py`.
@@ -465,6 +478,8 @@ pub fn generate_edit_plan(
     let mut last_v_file: Option<String> = None;
     let mut last_transition_type: Option<String> = None;
     let mut last_is_grid = false;
+    let mut last_action: Option<Vec<String>> = None;
+    let mut last_camera: Option<Vec<String>> = None;
 
     // Videos tagged with `keep_audio_tag`. Every tagged video is forced into
     // the plan (deduplicated by file) so all of their original audio clips are
@@ -554,8 +569,9 @@ pub fn generate_edit_plan(
         let pre_dur = audio_points[0] - t_m1;
         let post_dur = scene_end - audio_points[n_audio - 1];
 
-        let is_grid = rng.gen::<f32>() < args.grid_chance;
         let use_align = !args.no_align && n_audio >= 2;
+        let majors_in: Vec<f32> = major_beats.iter().copied().filter(|b| *b > t_m1 && *b < (t_m1 + out_dur)).collect();
+        let minor_density = if out_dur > 0.0 { minors.len() as f32 / out_dur } else { 0.0 };
 
         // candidate selection
         let mut candidates: Vec<&VideoData> = if use_align {
@@ -580,13 +596,47 @@ pub fn generate_edit_plan(
                 }
             }
         }
-        let v_seg = *candidates.choose(&mut rng).unwrap();
-        let v_file = v_seg.file.clone();
-        let v_acts = &v_seg.actpoints;
+        let mut v_seg = *candidates.choose(&mut rng).unwrap();
+        let mut v_file = v_seg.file.clone();
         // Consume the selected tagged video so it appears in the plan exactly once.
         if !tagged_remaining.is_empty() {
             tagged_remaining.retain(|v| v.file != v_file);
         }
+
+        // --- smart grid decision (metadata-driven) ---
+        let mut grid_panel_count = 3usize;
+        let mut is_grid = if args.smart_grid {
+            let side_candidates = count_side_candidates(videos, v_seg, args.grid_tag.as_deref());
+            let gc = select_grid(
+                &cfg.smart.grid,
+                &GridCtx { minor_density, v_seg, side_candidates },
+                &mut rng,
+            );
+            grid_panel_count = gc.panel_count.max(1);
+            gc.is_grid
+        } else {
+            rng.gen::<f32>() < args.grid_chance
+        };
+        if is_grid {
+            // When a grid tag is configured, the main panel must carry it.
+            if let Some(gt) = &args.grid_tag {
+                if !v_seg.tags.iter().any(|t| t == gt) {
+                    let tagged_cands: Vec<&VideoData> =
+                        videos.iter().filter(|v| v.tags.iter().any(|t| t == gt)).collect();
+                    if tagged_cands.is_empty() {
+                        is_grid = false;
+                    } else {
+                        v_seg = *tagged_cands.choose(&mut rng).unwrap();
+                        v_file = v_seg.file.clone();
+                    }
+                }
+            }
+            if count_side_candidates(videos, v_seg, args.grid_tag.as_deref()) == 0 {
+                is_grid = false;
+            }
+        }
+
+        let v_acts = &v_seg.actpoints;
         // Keep original source audio only for videos tagged with the configured
         // keep-audio tag (e.g. "sex"). All other clips render silent — their
         // background music (audio_path) still plays if configured.
@@ -606,17 +656,40 @@ pub fn generate_edit_plan(
 
         let beat_gap = t_m2 - t_m1;
         let is_grid_transition = last_is_grid || is_grid;
-        let trans_data = make_transition(&cfg.transitions, args, &mut rng, last_transition_type.as_deref(), is_grid_transition, beat_gap);
+        let cut_on_major = major_beats.iter().any(|b| (b - t_m2).abs() < 0.15);
+        let cut_on_action_change = last_action.as_ref().is_some_and(|a| a != &v_seg.action)
+            || last_camera.as_ref().is_some_and(|c| c != &v_seg.camera);
+        let suggested = suggested_transitions_for(audio_meta, t_m1);
+        let trans_data = if args.smart_transitions {
+            select_transition(
+                &cfg.transitions,
+                &cfg.smart.transitions,
+                &suggested,
+                is_grid_transition,
+                cut_on_major,
+                cut_on_action_change,
+                last_transition_type.as_deref(),
+                args.transition_chance,
+                beat_gap,
+                &mut rng,
+            )
+        } else {
+            make_transition(&cfg.transitions, args, &mut rng, last_transition_type.as_deref(), is_grid_transition, beat_gap)
+        };
         let trans_dur = trans_data.as_ref().map(|t| t.duration).unwrap_or(0.0);
         if let Some(ref tr) = trans_data {
             last_transition_type = Some(tr.transition_type.clone());
         }
         last_is_grid = is_grid;
+        last_action = Some(v_seg.action.clone());
+        last_camera = Some(v_seg.camera.clone());
 
         let mut clips: Vec<ClipSpec> = Vec::new();
         let mut side_effects: Vec<EffectSpec> = Vec::new();
         let mut s_seg: Option<&VideoData> = None;
+        let mut s_seg2: Option<&VideoData> = None;
         let mut s_start = 0.0f32;
+        let mut s2_start = 0.0f32;
         // Randomised start time for the grid main video (when random_cursor is on).
         let mut grid_v_start = v_seg.interval[0];
 
@@ -641,14 +714,30 @@ pub fn generate_edit_plan(
             if side_cands.is_empty() {
                 side_cands = videos.iter().collect();
             }
-            s_seg = Some(*side_cands.choose(&mut rng).unwrap());
-            let s_iv = s_seg.unwrap().interval;
-            let s_max = (s_iv[1] - out_dur).max(s_iv[0]);
-            s_start = if args.random_cursor && s_max > s_iv[0] {
-                rng.gen_range(s_iv[0]..s_max)
-            } else {
-                s_iv[0]
-            };
+            side_cands.shuffle(&mut rng);
+            s_seg = side_cands.first().copied();
+            // A 4-panel layout needs two distinct side clips.
+            if grid_panel_count >= 4 {
+                s_seg2 = side_cands.get(1).copied().filter(|v| v.file != s_seg.unwrap().file);
+            }
+            if let Some(sg) = s_seg {
+                let s_iv = sg.interval;
+                let s_max = (s_iv[1] - out_dur).max(s_iv[0]);
+                s_start = if args.random_cursor && s_max > s_iv[0] {
+                    rng.gen_range(s_iv[0]..s_max)
+                } else {
+                    s_iv[0]
+                };
+            }
+            if let Some(sg) = s_seg2 {
+                let s_iv = sg.interval;
+                let s_max = (s_iv[1] - out_dur).max(s_iv[0]);
+                s2_start = if args.random_cursor && s_max > s_iv[0] {
+                    rng.gen_range(s_iv[0]..s_max)
+                } else {
+                    s_iv[0]
+                };
+            }
             // color grade on side
             let roll = rng.gen::<f32>();
             let gc = &cfg.grid.color_grade_chances;
@@ -669,8 +758,59 @@ pub fn generate_edit_plan(
             }
         }
 
-        let make_grid = |v_start: f32, v_spd: f32, s_start: f32, side: &[EffectSpec], vf: &str, sf: &str| -> Vec<PanelSpec> {
-            grid_panels(sf, s_start, vf, v_start, v_spd, side)
+        // Panel builder honoring layout variety (grid_panel_count): the main
+        // video always sits at panel index 1, mirror panels reuse a side panel.
+        let make_grid = |v_start: f32, v_spd: f32, vf: &str| -> Vec<PanelSpec> {
+            let s_file = s_seg.map(|s| s.file.as_str()).unwrap_or(vf);
+            let side = |file: &str, start: f32, flip: Option<i32>, ref_idx: Option<usize>| PanelSpec {
+                frame: file.to_string(),
+                span: 1,
+                start_time: start,
+                flip,
+                speed: 1.0,
+                loop_: false,
+                effects: side_effects.clone(),
+                blend: "normal".into(),
+                shape: None,
+                yolo: false,
+                feature: false,
+                beat_tracking: false,
+                border_radius: 0.0,
+                border_width: 0.0,
+                border_color: None,
+                mask_dir: None,
+                ref_panel_idx: ref_idx,
+            };
+            let center = PanelSpec {
+                frame: vf.to_string(),
+                span: 1,
+                start_time: v_start,
+                flip: None,
+                speed: v_spd,
+                loop_: false,
+                effects: Vec::new(),
+                blend: "normal".into(),
+                shape: None,
+                yolo: false,
+                feature: false,
+                beat_tracking: false,
+                border_radius: 0.0,
+                border_width: 0.0,
+                border_color: None,
+                mask_dir: None,
+                ref_panel_idx: None,
+            };
+            let mut panels = vec![side(s_file, s_start, None, None), center];
+            match grid_panel_count {
+                2 => {}
+                3 => panels.push(side(s_file, s_start, Some(1), Some(0))),
+                _ => {
+                    let s2f = s_seg2.map(|s| s.file.as_str()).unwrap_or(s_file);
+                    panels.push(side(s2f, s2_start, None, None));
+                    panels.push(side(s_file, s_start, Some(1), Some(0)));
+                }
+            }
+            panels
         };
 
         if alignment_mode == "cc" {
@@ -702,7 +842,7 @@ pub fn generate_edit_plan(
                         mask_dir: None,
                     };
                     if is_grid {
-                        c.panels = make_grid(v_pre, 1.0, s_start, &side_effects, &v_file, s_seg.unwrap().file.as_str());
+                        c.panels = make_grid(v_pre, 1.0, &v_file);
                     }
                     ensure_base_effect(&mut c.effects, apd);
                     clips.push(c);
@@ -725,13 +865,36 @@ pub fn generate_edit_plan(
             };
             if is_grid {
                 let v0 = if args.random_cursor { grid_v_start } else { v_acts[0] };
-                aligned.panels = make_grid(v0, speed, s_start, &side_effects, &v_file, s_seg.unwrap().file.as_str());
-                let beats: Vec<(f32, f32)> = filtered.iter().map(|mb| (*mb, *mb - audio_points[0])).collect();
-                let center = aligned.panels.get_mut(1).unwrap();
-                apply_common_beat_effects(&mut center.effects, &cfg.beat_effects.cc, &beats, &mut rng);
-                apply_panel_effects(&mut center.effects, &cfg.beat_effects.cc, &beats, &mut rng);
-                apply_grid_frame_effects(&mut aligned.effects, &cfg.beat_effects.cc, &beats, &mut rng);
-                add_pulse_effects(&mut aligned.effects, &cfg.beat_effects.cc, audio_points[0], audio_points[0] + a_dur, &detected_beats);
+                aligned.panels = make_grid(v0, speed, &v_file);
+                if args.smart_effects {
+                    let pts = smart_effect_points(
+                        &filtered, &majors_in,
+                        audio_points[0], audio_points[0] + a_dur, audio_points[0],
+                        v_seg, v_acts[0], v_acts[v_acts.len() - 1],
+                        |vp| (vp - v_acts[0]) * a_dur / v_dur.max(0.001),
+                    );
+                    let ctx = EffectCtx { is_grid: true, action: &v_seg.action, camera: &v_seg.camera, focus: &v_seg.focus };
+                    let sel = select_effects(&cfg.smart.effects, &ctx, &pts, &mut rng);
+                    aligned.panels.get_mut(1).unwrap().effects.extend(sel.panel);
+                    aligned.effects.extend(sel.frame);
+                } else {
+                    let beats: Vec<(f32, f32)> = filtered.iter().map(|mb| (*mb, *mb - audio_points[0])).collect();
+                    let center = aligned.panels.get_mut(1).unwrap();
+                    apply_common_beat_effects(&mut center.effects, &cfg.beat_effects.cc, &beats, &mut rng);
+                    apply_panel_effects(&mut center.effects, &cfg.beat_effects.cc, &beats, &mut rng);
+                    apply_grid_frame_effects(&mut aligned.effects, &cfg.beat_effects.cc, &beats, &mut rng);
+                    add_pulse_effects(&mut aligned.effects, &cfg.beat_effects.cc, audio_points[0], audio_points[0] + a_dur, &detected_beats);
+                }
+            } else if args.smart_effects {
+                let pts = smart_effect_points(
+                    &filtered, &majors_in,
+                    audio_points[0], audio_points[0] + a_dur, audio_points[0],
+                    v_seg, v_acts[0], v_acts[v_acts.len() - 1],
+                    |vp| (vp - v_acts[0]) * a_dur / v_dur.max(0.001),
+                );
+                let ctx = EffectCtx { is_grid: false, action: &v_seg.action, camera: &v_seg.camera, focus: &v_seg.focus };
+                let sel = select_effects(&cfg.smart.effects, &ctx, &pts, &mut rng);
+                aligned.effects.extend(sel.panel);
             } else {
                 let beats: Vec<(f32, f32)> = filtered.iter().map(|mb| (*mb, *mb - audio_points[0])).collect();
                 apply_common_beat_effects(&mut aligned.effects, &cfg.beat_effects.cc, &beats, &mut rng);
@@ -760,7 +923,7 @@ pub fn generate_edit_plan(
                         mask_dir: None,
                     };
                     if is_grid {
-                        c.panels = make_grid(v_post, 1.0, s_start, &side_effects, &v_file, s_seg.unwrap().file.as_str());
+                        c.panels = make_grid(v_post, 1.0, &v_file);
                     }
                     ensure_base_effect(&mut c.effects, apd);
                     clips.push(c);
@@ -789,13 +952,36 @@ pub fn generate_edit_plan(
                 mask_dir: None,
             };
             if is_grid {
-                c.panels = make_grid(v_start, 1.0, s_start, &side_effects, &v_file, s_seg.unwrap().file.as_str());
-                let beats: Vec<(f32, f32)> = filtered.iter().map(|mb| (*mb, *mb - t_m1)).collect();
-                let center = c.panels.get_mut(1).unwrap();
-                apply_common_beat_effects(&mut center.effects, &cfg.beat_effects.grid, &beats, &mut rng);
-                apply_panel_effects(&mut center.effects, &cfg.beat_effects.grid, &beats, &mut rng);
-                apply_grid_frame_effects(&mut c.effects, &cfg.beat_effects.grid, &beats, &mut rng);
-                add_pulse_effects(&mut c.effects, &cfg.beat_effects.grid, t_m1, t_m1 + out_dur, &detected_beats);
+                c.panels = make_grid(v_start, 1.0, &v_file);
+                if args.smart_effects {
+                    let pts = smart_effect_points(
+                        &filtered, &majors_in,
+                        t_m1, t_m1 + out_dur, t_m1,
+                        v_seg, v_start, v_start + out_dur,
+                        |vp| vp - v_start,
+                    );
+                    let ctx = EffectCtx { is_grid: true, action: &v_seg.action, camera: &v_seg.camera, focus: &v_seg.focus };
+                    let sel = select_effects(&cfg.smart.effects, &ctx, &pts, &mut rng);
+                    c.panels.get_mut(1).unwrap().effects.extend(sel.panel);
+                    c.effects.extend(sel.frame);
+                } else {
+                    let beats: Vec<(f32, f32)> = filtered.iter().map(|mb| (*mb, *mb - t_m1)).collect();
+                    let center = c.panels.get_mut(1).unwrap();
+                    apply_common_beat_effects(&mut center.effects, &cfg.beat_effects.grid, &beats, &mut rng);
+                    apply_panel_effects(&mut center.effects, &cfg.beat_effects.grid, &beats, &mut rng);
+                    apply_grid_frame_effects(&mut c.effects, &cfg.beat_effects.grid, &beats, &mut rng);
+                    add_pulse_effects(&mut c.effects, &cfg.beat_effects.grid, t_m1, t_m1 + out_dur, &detected_beats);
+                }
+            } else if args.smart_effects {
+                let pts = smart_effect_points(
+                    &filtered, &majors_in,
+                    t_m1, t_m1 + out_dur, t_m1,
+                    v_seg, v_start, v_start + out_dur,
+                    |vp| vp - v_start,
+                );
+                let ctx = EffectCtx { is_grid: false, action: &v_seg.action, camera: &v_seg.camera, focus: &v_seg.focus };
+                let sel = select_effects(&cfg.smart.effects, &ctx, &pts, &mut rng);
+                c.effects.extend(sel.panel);
             } else {
                 let beats: Vec<(f32, f32)> = filtered.iter().map(|mb| (*mb, *mb - t_m1)).collect();
                 apply_common_beat_effects(&mut c.effects, &cfg.beat_effects.single, &beats, &mut rng);
